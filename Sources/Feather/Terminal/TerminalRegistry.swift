@@ -12,6 +12,8 @@ extension Notification.Name {
     "FeatherToggleInspectorRequested")
   static let featherSaveDocumentRequested = Notification.Name("FeatherSaveDocumentRequested")
   static let featherQuickOpenRequested = Notification.Name("FeatherQuickOpenRequested")
+  static let featherRepositorySearchRequested = Notification.Name(
+    "FeatherRepositorySearchRequested")
 }
 
 @MainActor
@@ -21,6 +23,13 @@ struct TerminalHandle {
   let view: GhosttyTerminalView
 }
 
+enum TerminalSurfaceRuntimeEvent: Equatable {
+  case running
+  case attention
+  case commandFinished
+  case exited
+}
+
 @MainActor
 final class TerminalRegistry {
   private let configURL: URL?
@@ -28,6 +37,7 @@ final class TerminalRegistry {
   private var idleHost: ManagedGhosttyHost?
   private var handles: [UUID: TerminalHandle] = [:]
   private(set) var initializationError: String?
+  var runtimeEventHandler: ((UUID, TerminalSurfaceRuntimeEvent) -> Void)?
 
   init(applicationSupportURL: URL, launchSpec: TmuxLaunchSpec?) {
     self.launchSpec = launchSpec
@@ -45,7 +55,19 @@ final class TerminalRegistry {
 
   func handle(for terminal: TerminalRecord, appearance: AppearancePreference) -> TerminalHandle? {
     if let existing = handles[terminal.id] { return existing }
-    guard let configURL, let launchSpec else { return nil }
+    guard let configURL else { return nil }
+
+    let attachCommand: String
+    switch terminal.executionTarget {
+    case .local:
+      guard let launchSpec else { return nil }
+      attachCommand = launchSpec.attachCommand(
+        sessionID: terminal.tmuxSessionID,
+        workingDirectory: terminal.worktreePath
+      )
+    case .ssh(let remote):
+      attachCommand = remote.attachCommand(sessionID: terminal.tmuxSessionID)
+    }
 
     let host: ManagedGhosttyHost
     do {
@@ -55,12 +77,7 @@ final class TerminalRegistry {
       } else {
         host = try ManagedGhosttyHost(configURL: configURL)
       }
-      try host.setLaunchCommand(
-        launchSpec.attachCommand(
-          sessionID: terminal.tmuxSessionID,
-          workingDirectory: terminal.worktreePath
-        )
-      )
+      try host.setLaunchCommand(attachCommand)
     } catch {
       initializationError = error.localizedDescription
       return nil
@@ -92,6 +109,29 @@ final class TerminalRegistry {
         )
       default:
         break
+      }
+    }
+    session.actionHandler = { [weak self] action in
+      let event: TerminalSurfaceRuntimeEvent?
+      switch action {
+      case .desktopNotification, .ringBell:
+        event = .attention
+      case .progress(let state, _):
+        switch state {
+        case .active, .indeterminate:
+          event = .running
+        case .error, .none, .paused:
+          event = nil
+        }
+      case .commandFinished:
+        event = .commandFinished
+      case .childExited:
+        event = .exited
+      default:
+        event = nil
+      }
+      if let event {
+        self?.runtimeEventHandler?(terminal.id, event)
       }
     }
     let view = session.makeView()

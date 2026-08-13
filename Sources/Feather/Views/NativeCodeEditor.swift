@@ -209,6 +209,7 @@ struct NativeCodeTextView: NSViewRepresentable {
   let path: String
   let isDark: Bool
   let wrapsLines: Bool
+  let revealLine: Int?
 
   func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -251,6 +252,7 @@ struct NativeCodeTextView: NSViewRepresentable {
     context.coordinator.lineNumbers = lineNumbers
     configure(scrollView, textView: textView)
     context.coordinator.apply(text, to: textView)
+    context.coordinator.reveal(revealLine, in: textView)
     return TextSurfaceContainerView(scrollView: scrollView, lineNumberView: lineNumbers)
   }
 
@@ -259,6 +261,7 @@ struct NativeCodeTextView: NSViewRepresentable {
     guard let textView = scrollView.documentView as? NSTextView else { return }
     let themeChanged = context.coordinator.parent.isDark != isDark
     let pathChanged = context.coordinator.parent.path != path
+    let revealedLineChanged = context.coordinator.parent.revealLine != revealLine
     context.coordinator.parent = self
     configure(scrollView, textView: textView)
     context.coordinator.lineNumbers?.needsDisplay = true
@@ -266,6 +269,9 @@ struct NativeCodeTextView: NSViewRepresentable {
       context.coordinator.apply(text, to: textView)
     } else if themeChanged || pathChanged {
       context.coordinator.rehighlight(textView)
+    }
+    if pathChanged || revealedLineChanged {
+      context.coordinator.reveal(revealLine, in: textView)
     }
   }
 
@@ -345,6 +351,25 @@ struct NativeCodeTextView: NSViewRepresentable {
       let value = textView.string as NSString
       let location = min(textView.selectedRange().location, value.length)
       lineNumbers?.selectedLineRange = value.lineRange(for: NSRange(location: location, length: 0))
+    }
+
+    func reveal(_ line: Int?, in textView: NSTextView) {
+      guard let line, line > 0 else { return }
+      let value = textView.string as NSString
+      var currentLine = 1
+      var location = 0
+      while currentLine < line, location < value.length {
+        let range = value.lineRange(for: NSRange(location: location, length: 0))
+        location = NSMaxRange(range)
+        currentLine += 1
+      }
+      guard currentLine == line, location <= value.length else { return }
+      let range = value.lineRange(for: NSRange(location: location, length: 0))
+      textView.setSelectedRange(range)
+      lineNumbers?.selectedLineRange = range
+      DispatchQueue.main.async { [weak textView] in
+        textView?.scrollRangeToVisible(range)
+      }
     }
 
     func textStorage(

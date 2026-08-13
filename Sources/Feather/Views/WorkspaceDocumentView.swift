@@ -21,16 +21,25 @@ final class WorkspaceDocumentController: ObservableObject {
     let rootPath: String
     let path: String
     let diff: DiffRequest?
+    let line: Int?
 
-    init(id: UUID = UUID(), rootPath: String, path: String, diff: DiffRequest?) {
+    init(
+      id: UUID = UUID(),
+      rootPath: String,
+      path: String,
+      diff: DiffRequest?,
+      line: Int? = nil
+    ) {
       self.id = id
       self.rootPath = rootPath
       self.path = path
       self.diff = diff
+      self.line = line
     }
 
     static func == (left: Request, right: Request) -> Bool {
       left.rootPath == right.rootPath && left.path == right.path && left.diff == right.diff
+        && left.line == right.line
     }
   }
 
@@ -92,8 +101,8 @@ final class WorkspaceDocumentController: ObservableObject {
       ? String(request.path.dropFirst(prefix.count)) : request.path
   }
 
-  func openFile(rootPath: String, path: String) {
-    requestOpen(Request(rootPath: rootPath, path: path, diff: nil))
+  func openFile(rootPath: String, path: String, line: Int? = nil) {
+    requestOpen(Request(rootPath: rootPath, path: path, diff: nil, line: line))
   }
 
   func openDiff(rootPath: String, file: GitStatusFile, staged: Bool) {
@@ -227,7 +236,8 @@ final class WorkspaceDocumentController: ObservableObject {
         id: existing.id,
         rootPath: next.rootPath,
         path: next.path,
-        diff: next.diff
+        diff: next.diff,
+        line: next.line
       )
       if selectedTabID == existing.id {
         updateTab(updated)
@@ -257,7 +267,8 @@ final class WorkspaceDocumentController: ObservableObject {
         id: tabs[existingIndex].id,
         rootPath: next.rootPath,
         path: next.path,
-        diff: next.diff
+        diff: next.diff,
+        line: next.line
       )
       tabs[existingIndex].request = selectedRequest
     } else {
@@ -765,7 +776,8 @@ struct WorkspaceDocumentView: View {
           ),
           path: controller.relativePath,
           isDark: colorScheme == .dark,
-          wrapsLines: wrapsLines
+          wrapsLines: wrapsLines,
+          revealLine: controller.request?.line
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()

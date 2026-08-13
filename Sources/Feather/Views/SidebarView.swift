@@ -124,7 +124,7 @@ struct SidebarView: View {
     let pendingWorktree = model.pendingCreation(for: repository)
     let isCollapsed = collapsedRepositories.contains(repository.id)
     let hasChildren = pendingWorktree != nil || !managedWorktrees.isEmpty
-    let mainAgents = agentKinds(repositoryID: repository.id, worktreePath: repository.path)
+    let mainAgents = agentSessions(repositoryID: repository.id, worktreePath: repository.path)
     let mainSelected =
       model.selectedRepositoryID == repository.id
       && model.selectedWorktreePath == repository.path
@@ -156,7 +156,7 @@ struct SidebarView: View {
         .help(repository.path)
 
         if !mainAgents.isEmpty {
-          AgentSessionBadges(kinds: mainAgents)
+          AgentSessionBadges(sessions: mainAgents)
         }
 
         if hasChildren {
@@ -272,7 +272,7 @@ struct SidebarView: View {
       && model.selectedWorktreePath == worktree.path
     let isAvailable =
       model.managedWorktreeState(repositoryID: repository.id, path: worktree.path) == .available
-    let agents = agentKinds(repositoryID: repository.id, worktreePath: worktree.path)
+    let agents = agentSessions(repositoryID: repository.id, worktreePath: worktree.path)
     return Button {
       model.selectWorktree(repositoryID: repository.id, path: worktree.path)
     } label: {
@@ -290,7 +290,7 @@ struct SidebarView: View {
         Spacer(minLength: 0)
 
         if !agents.isEmpty {
-          AgentSessionBadges(kinds: agents)
+          AgentSessionBadges(sessions: agents)
         }
 
         if isAvailable {
@@ -331,8 +331,18 @@ struct SidebarView: View {
     .help(worktree.path)
   }
 
-  private func agentKinds(repositoryID: UUID, worktreePath: String) -> [AgentKind] {
+  private func agentSessions(
+    repositoryID: UUID,
+    worktreePath: String
+  ) -> [AgentSessionPresentation] {
     model.terminals(repositoryID: repositoryID, worktreePath: worktreePath)
-      .compactMap(AgentKind.init(terminal:))
+      .compactMap { terminal in
+        guard let kind = AgentKind(terminal: terminal) else { return nil }
+        return AgentSessionPresentation(
+          id: terminal.id,
+          kind: kind,
+          state: model.runtimeState(for: terminal)
+        )
+      }
   }
 }

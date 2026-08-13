@@ -45,7 +45,18 @@ struct PersistenceTests {
       repositoryID: repository.id,
       worktreePath: repository.path,
       title: "Codex",
-      order: 0
+      order: 0,
+      executionTarget: .ssh(
+        SSHRemoteTerminal(
+          target: SSHRemoteTarget(
+            host: "build-host",
+            port: 2222,
+            rootPath: "/srv/feather"
+          ),
+          workingDirectory: "/srv/feather/worktrees/repo",
+          tmuxConfigPath: "/srv/feather/.feather/tmux.conf"
+        )
+      )
     )
     let snapshot = ApplicationSnapshot(
       repositories: [repository],
@@ -56,7 +67,12 @@ struct PersistenceTests {
       selectedWorktreePath: repository.path,
       selectedTerminalID: terminal.id,
       sidebarVisible: false,
-      inspectorVisible: true
+      inspectorVisible: true,
+      remoteTarget: SSHRemoteTarget(
+        host: "build-host",
+        port: 2222,
+        rootPath: "/srv/feather"
+      )
     )
     let store = JSONStateStore(fileURL: temporaryRoot.appendingPathComponent("state.json"))
 
@@ -89,6 +105,7 @@ struct PersistenceTests {
 
     #expect(snapshot.managedWorktrees.first?.state == .active)
     #expect(snapshot.inspectorVisible == false)
+    #expect(snapshot.remoteTarget == SSHRemoteTarget())
   }
 
   @Test
@@ -117,6 +134,38 @@ struct PersistenceTests {
     #expect(snapshot.repositories.first?.remoteURL == nil)
     #expect(snapshot.managedWorktrees.isEmpty)
     #expect(snapshot.sidebarVisible)
+    #expect(snapshot.terminals.allSatisfy { $0.executionTarget == .local })
+  }
+
+  @Test
+  func loadsLegacyTerminalAsLocal() throws {
+    let repositoryID = UUID()
+    let terminalID = UUID()
+    let json = """
+      {
+        "version": 4,
+        "repositories": [],
+        "managedWorktrees": [],
+        "terminals": [
+          {
+            "id": "\(terminalID.uuidString)",
+            "repositoryID": "\(repositoryID.uuidString)",
+            "worktreePath": "/tmp/legacy",
+            "title": "Codex",
+            "order": 0,
+            "tmuxSessionID": "feather-legacy"
+          }
+        ]
+      }
+      """
+
+    let snapshot = try JSONDecoder().decode(
+      ApplicationSnapshot.self,
+      from: Data(json.utf8)
+    )
+
+    #expect(snapshot.terminals.first?.executionTarget == .local)
+    #expect(snapshot.remoteTarget == SSHRemoteTarget())
   }
 
   @Test

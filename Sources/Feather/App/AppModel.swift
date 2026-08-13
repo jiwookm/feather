@@ -48,6 +48,8 @@ final class AppModel: ObservableObject {
     case closePane(TerminalRecord, TerminalPaneState)
     case removeWorktree(RepositoryRecord, GitWorktree)
     case returnWorktree(RepositoryRecord, GitWorktree)
+    case handoffTerminal(TerminalRecord, SSHRemoteTarget)
+    case message(String, String)
 
     var id: String {
       switch self {
@@ -56,6 +58,8 @@ final class AppModel: ObservableObject {
       case .closePane(_, let pane): "pane-\(pane.id)"
       case .removeWorktree(_, let worktree): "worktree-\(worktree.path)"
       case .returnWorktree(_, let worktree): "return-\(worktree.path)"
+      case .handoffTerminal(let terminal, _): "handoff-\(terminal.id)"
+      case .message(let title, let message): "message-\(title)-\(message)"
       }
     }
   }
@@ -64,6 +68,7 @@ final class AppModel: ObservableObject {
   @Published private(set) var worktreesByRepository: [UUID: [GitWorktree]] = [:]
   @Published private(set) var managedWorktrees: [ManagedWorktreeRecord]
   @Published private(set) var terminals: [TerminalRecord]
+  @Published private(set) var terminalRuntimeStates: [UUID: TerminalRuntimeState] = [:]
   @Published private(set) var pendingWorktree: WorktreeCreation?
   @Published private(set) var selectedPendingWorktreeID: UUID?
   @Published var selectedRepositoryID: UUID?
@@ -81,14 +86,22 @@ final class AppModel: ObservableObject {
       persist()
     }
   }
+  @Published private(set) var remoteTarget: SSHRemoteTarget {
+    didSet {
+      guard oldValue != remoteTarget else { return }
+      persist()
+    }
+  }
 
   let stateStore: JSONStateStore
   let gitService = GitService()
+  let remoteHandoffService = RemoteHandoffService()
   let tmuxBackend: TmuxBackend?
   let tmuxSpec: TmuxLaunchSpec?
   let terminalRegistry: TerminalRegistry
   let worktreesRoot: URL
   private var hasStarted = false
+  private var terminalMonitorTask: Task<Void, Never>?
 
   init() {
     let fallbackSupport = FileManager.default.homeDirectoryForCurrentUser
@@ -106,6 +119,7 @@ final class AppModel: ObservableObject {
     selectedTerminalID = snapshot.selectedTerminalID
     sidebarVisible = snapshot.sidebarVisible
     inspectorVisible = snapshot.inspectorVisible
+    remoteTarget = snapshot.remoteTarget
     worktreesRoot = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Developer/Worktrees", isDirectory: true)
 
@@ -116,6 +130,9 @@ final class AppModel: ObservableObject {
       applicationSupportURL: applicationSupportURL,
       launchSpec: preparedSpec
     )
+    terminalRegistry.runtimeEventHandler = { [weak self] terminalID, event in
+      self?.handleTerminalRuntimeEvent(terminalID: terminalID, event: event)
+    }
   }
 
   var selectedRepository: RepositoryRecord? {
@@ -143,6 +160,12 @@ final class AppModel: ObservableObject {
 
   var canCreateTerminal: Bool {
     selectedWorktree != nil && selectedManagedWorktreeState != .available
+  }
+
+  var canHandoffSelectedTerminal: Bool {
+    guard remoteTarget.isConfigured, let terminal = selectedTerminal else { return false }
+    if case .local = terminal.executionTarget { return !isBusy }
+    return false
   }
 
   var selectedWorktreeTerminals: [TerminalRecord] {
@@ -224,6 +247,8 @@ final class AppModel: ObservableObject {
         show(error)
       }
       await refreshAll()
+      await ensureTerminalMonitorSession()
+      updateTerminalMonitor()
     }
   }
 
@@ -312,6 +337,7 @@ final class AppModel: ObservableObject {
     } else {
       selectedTerminalID = nil
     }
+    acknowledgeAttentionIfNeeded(selectedTerminalID)
     persist()
   }
 
@@ -325,7 +351,21 @@ final class AppModel: ObservableObject {
 
   func selectTerminal(_ id: UUID) {
     selectedTerminalID = id
+    acknowledgeAttentionIfNeeded(id)
     persist()
+  }
+
+  func runtimeState(for terminal: TerminalRecord) -> TerminalRuntimeState {
+    terminalRuntimeStates[terminal.id]
+      ?? (AgentKind(terminal: terminal) == nil ? .shell : .running)
+  }
+
+  func terminalSurfaceDidAttach(_ terminal: TerminalRecord) {
+    if terminalRuntimeStates[terminal.id] == nil || terminalRuntimeStates[terminal.id] == .exited {
+      terminalRuntimeStates[terminal.id] =
+        AgentKind(terminal: terminal) == nil ? .shell : .running
+    }
+    updateTerminalMonitor()
   }
 
   func selectAdjacentTerminal(reverse: Bool = false) {
@@ -352,26 +392,33 @@ final class AppModel: ObservableObject {
       presentedAlert = .error(FeatherError.tmuxUnavailable.localizedDescription)
       return
     }
+    guard let tmuxBackend else {
+      presentedAlert = .error(FeatherError.tmuxUnavailable.localizedDescription)
+      return
+    }
     let command = launch.command
     let terminal = makeTerminal(
       repositoryID: repositoryID,
       worktreePath: worktreePath,
       title: command == nil ? nil : launch.title
     )
-    guard let command, let tmuxBackend else {
-      addTerminal(terminal)
-      return
-    }
 
     isBusy = true
     Task {
       var launchError: Error?
       do {
-        try await tmuxBackend.launchCommand(
-          command,
-          sessionID: terminal.tmuxSessionID,
-          workingDirectory: terminal.worktreePath
-        )
+        if let command {
+          try await tmuxBackend.launchCommand(
+            command,
+            sessionID: terminal.tmuxSessionID,
+            workingDirectory: terminal.worktreePath
+          )
+        } else {
+          try await tmuxBackend.ensureSession(
+            terminal.tmuxSessionID,
+            workingDirectory: terminal.worktreePath
+          )
+        }
       } catch {
         launchError = error
       }
@@ -384,12 +431,14 @@ final class AppModel: ObservableObject {
   }
 
   func splitTerminal(_ direction: TerminalSplitDirection) {
-    guard let terminal = selectedTerminal, let tmuxBackend else { return }
+    guard let terminal = selectedTerminal, let backend = terminalBackend(for: terminal) else {
+      return
+    }
     Task {
       do {
-        try await tmuxBackend.splitPane(
+        try await backend.splitPane(
           sessionID: terminal.tmuxSessionID,
-          workingDirectory: terminal.worktreePath,
+          workingDirectory: terminalWorkingDirectory(terminal),
           direction: direction
         )
       } catch {
@@ -417,11 +466,15 @@ final class AppModel: ObservableObject {
 
   private func addTerminal(_ terminal: TerminalRecord) {
     terminals.append(terminal)
+    terminalRuntimeStates[terminal.id] =
+      AgentKind(terminal: terminal) == nil ? .shell : .running
     selectedTerminalID = terminal.id
     persist()
+    updateTerminalMonitor()
   }
 
   func requestCloseTerminal(_ id: UUID? = nil, requiresConfirmation: Bool = true) {
+    guard !isBusy else { return }
     guard let terminal = terminals.first(where: { $0.id == (id ?? selectedTerminalID) }) else {
       return
     }
@@ -432,7 +485,8 @@ final class AppModel: ObservableObject {
     Task {
       do {
         let command =
-          try await tmuxBackend?.foregroundCommand(terminal.tmuxSessionID) ?? "terminal process"
+          try await terminalBackend(for: terminal)?.foregroundCommand(terminal.tmuxSessionID)
+          ?? "terminal process"
         presentedAlert = .closeTerminal(terminal, command)
       } catch {
         show(error)
@@ -441,13 +495,14 @@ final class AppModel: ObservableObject {
   }
 
   func requestCloseContext() {
-    guard let terminal = selectedTerminal, let tmuxBackend else {
+    guard !isBusy else { return }
+    guard let terminal = selectedTerminal, let backend = terminalBackend(for: terminal) else {
       requestCloseTerminal()
       return
     }
     Task {
       do {
-        guard let pane = try await tmuxBackend.activePane(terminal.tmuxSessionID) else {
+        guard let pane = try await backend.activePane(terminal.tmuxSessionID) else {
           presentedAlert = .closeTerminal(terminal, "terminal process")
           return
         }
@@ -466,10 +521,10 @@ final class AppModel: ObservableObject {
   }
 
   func confirmClosePane(_ pane: TerminalPaneState, in terminal: TerminalRecord) {
-    guard let tmuxBackend else { return }
+    guard let backend = terminalBackend(for: terminal) else { return }
     Task {
       do {
-        guard try await tmuxBackend.killPane(pane.id, sessionID: terminal.tmuxSessionID) else {
+        guard try await backend.killPane(pane.id, sessionID: terminal.tmuxSessionID) else {
           presentedAlert = .error("That pane changed. Press ⌘W again to close the active pane.")
           return
         }
@@ -651,6 +706,75 @@ final class AppModel: ObservableObject {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: selectedWorktreePath)])
   }
 
+  func saveRemoteTarget(_ target: SSHRemoteTarget) {
+    do {
+      remoteTarget = try SSHRemoteTargetValidator.validate(target)
+      presentedAlert = .message("Remote Target Saved", remoteTarget.host)
+    } catch {
+      show(error)
+    }
+  }
+
+  func testRemoteTarget(_ target: SSHRemoteTarget) {
+    guard !isBusy else { return }
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        try await remoteHandoffService.checkTarget(target)
+        presentedAlert = .message(
+          "Remote Target Ready",
+          "SSH connected successfully, and both Git and tmux are installed."
+        )
+      } catch {
+        show(error)
+      }
+    }
+  }
+
+  func requestRemoteHandoff() {
+    guard canHandoffSelectedTerminal, let terminal = selectedTerminal else { return }
+    do {
+      let target = try SSHRemoteTargetValidator.validate(remoteTarget)
+      presentedAlert = .handoffTerminal(terminal, target)
+    } catch {
+      show(error)
+    }
+  }
+
+  func confirmRemoteHandoff(_ terminal: TerminalRecord, target: SSHRemoteTarget) {
+    guard !isBusy, terminal.id == selectedTerminalID,
+      terminals.contains(where: { $0.id == terminal.id })
+    else { return }
+    guard let repository = repositories.first(where: { $0.id == terminal.repositoryID }) else {
+      return
+    }
+
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        let remote = try await remoteHandoffService.prepare(
+          repository: repository,
+          worktreePath: terminal.worktreePath,
+          terminalID: terminal.id,
+          sessionID: terminal.tmuxSessionID,
+          target: target
+        )
+        guard let index = terminals.firstIndex(where: { $0.id == terminal.id }) else { return }
+        guard let tmuxBackend else { throw FeatherError.tmuxUnavailable }
+        try await tmuxBackend.killSession(terminal.tmuxSessionID)
+        terminalRegistry.release(terminal.id)
+        terminals[index].executionTarget = .ssh(remote)
+        terminalRuntimeStates[terminal.id] = .shell
+        persist()
+        updateTerminalMonitor()
+      } catch {
+        show(error)
+      }
+    }
+  }
+
   func toggleSidebar() {
     sidebarVisible.toggle()
     persist()
@@ -662,15 +786,24 @@ final class AppModel: ObservableObject {
   }
 
   private func closeTerminal(_ terminal: TerminalRecord) async {
-    if let tmuxBackend {
-      try? await tmuxBackend.killSession(terminal.tmuxSessionID)
+    guard let backend = terminalBackend(for: terminal) else {
+      show(FeatherError.tmuxUnavailable)
+      return
+    }
+    do {
+      try await backend.killSession(terminal.tmuxSessionID)
+    } catch {
+      show(error)
+      return
     }
     terminalRegistry.release(terminal.id)
     terminals.removeAll { $0.id == terminal.id }
+    terminalRuntimeStates.removeValue(forKey: terminal.id)
     if selectedTerminalID == terminal.id {
       selectedTerminalID = selectedWorktreeTerminals.first?.id
     }
     persist()
+    updateTerminalMonitor()
   }
 
   private func removeProject(
@@ -703,7 +836,7 @@ final class AppModel: ObservableObject {
         }
       }
 
-      await terminateTerminals(repositoryID: repository.id)
+      try await terminateTerminals(repositoryID: repository.id)
 
       if deleteManagedWorktrees {
         for path in liveOwnedPaths {
@@ -736,15 +869,20 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func terminateTerminals(repositoryID: UUID) async {
+  private func terminateTerminals(repositoryID: UUID) async throws {
     let projectTerminals = terminals.filter { $0.repositoryID == repositoryID }
     for terminal in projectTerminals {
-      if let tmuxBackend {
-        try? await tmuxBackend.killSession(terminal.tmuxSessionID)
+      guard let backend = terminalBackend(for: terminal) else {
+        throw FeatherError.tmuxUnavailable
       }
+      try await backend.killSession(terminal.tmuxSessionID)
       terminalRegistry.release(terminal.id)
     }
     terminals.removeAll { $0.repositoryID == repositoryID }
+    for terminal in projectTerminals {
+      terminalRuntimeStates.removeValue(forKey: terminal.id)
+    }
+    updateTerminalMonitor()
   }
 
   private func updateWorktree(_ worktree: GitWorktree, repositoryID: UUID) {
@@ -805,12 +943,155 @@ final class AppModel: ObservableObject {
       selectedWorktreePath: selectedWorktreePath,
       selectedTerminalID: selectedTerminalID,
       sidebarVisible: sidebarVisible,
-      inspectorVisible: inspectorVisible
+      inspectorVisible: inspectorVisible,
+      remoteTarget: remoteTarget
     )
     try? stateStore.save(snapshot)
   }
 
   private func show(_ error: Error) {
     presentedAlert = .error(error.localizedDescription)
+  }
+
+  private func terminalBackend(for terminal: TerminalRecord) -> (any TerminalBackend)? {
+    switch terminal.executionTarget {
+    case .local:
+      tmuxBackend
+    case .ssh(let remote):
+      SSHTmuxBackend(remote: remote)
+    }
+  }
+
+  private func terminalWorkingDirectory(_ terminal: TerminalRecord) -> String {
+    switch terminal.executionTarget {
+    case .local: terminal.worktreePath
+    case .ssh(let remote): remote.workingDirectory
+    }
+  }
+
+  private func ensureTerminalMonitorSession() async {
+    guard let tmuxBackend,
+      let terminal = terminals.first(where: { terminal in
+        terminal.id == selectedTerminalID && terminal.executionTarget == .local
+      }) ?? terminals.first(where: { $0.executionTarget == .local })
+    else { return }
+    try? await tmuxBackend.ensureSession(
+      terminal.tmuxSessionID,
+      workingDirectory: terminal.worktreePath
+    )
+  }
+
+  private func acknowledgeAttentionIfNeeded(_ terminalID: UUID?) {
+    guard let terminalID, terminalRuntimeStates[terminalID] == .attention,
+      let terminal = terminals.first(where: { $0.id == terminalID })
+    else { return }
+
+    terminalRuntimeStates[terminalID] = .running
+    switch terminal.executionTarget {
+    case .local:
+      guard let tmuxBackend else { return }
+      Task {
+        try? await tmuxBackend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+        await refreshLocalTerminalStates()
+      }
+    case .ssh(let remote):
+      let backend = SSHTmuxBackend(remote: remote)
+      Task {
+        guard
+          let command = try? await backend.foregroundCommand(terminal.tmuxSessionID),
+          terminals.contains(where: { $0.id == terminalID })
+        else { return }
+        terminalRuntimeStates[terminalID] =
+          TmuxSessionRuntimeSnapshot(
+            sessionID: terminal.tmuxSessionID,
+            command: command,
+            paneDead: false,
+            hasBell: false
+          ).state
+      }
+    }
+  }
+
+  private func updateTerminalMonitor() {
+    let hasLocalTerminal = terminals.contains { terminal in
+      if case .local = terminal.executionTarget { return true }
+      return false
+    }
+    guard hasLocalTerminal, let tmuxBackend else {
+      terminalMonitorTask?.cancel()
+      terminalMonitorTask = nil
+      return
+    }
+    guard terminalMonitorTask == nil else { return }
+    terminalMonitorTask = Task { [weak self] in
+      guard let self else { return }
+      await refreshLocalTerminalStates()
+      while !Task.isCancelled {
+        do {
+          try await tmuxBackend.waitForStateChange()
+          guard !Task.isCancelled else { break }
+          await refreshLocalTerminalStates()
+        } catch is CancellationError {
+          break
+        } catch {
+          break
+        }
+      }
+      terminalMonitorTask = nil
+    }
+  }
+
+  private func refreshLocalTerminalStates() async {
+    guard let tmuxBackend, let snapshots = try? await tmuxBackend.runtimeSnapshots() else { return }
+    let bySession = Dictionary(grouping: snapshots, by: \.sessionID).mapValues { snapshots in
+      if snapshots.contains(where: { $0.state == .attention }) {
+        return TerminalRuntimeState.attention
+      }
+      if snapshots.contains(where: { $0.state == .running }) { return TerminalRuntimeState.running }
+      if snapshots.contains(where: { $0.state == .shell }) { return TerminalRuntimeState.shell }
+      return TerminalRuntimeState.exited
+    }
+    for terminal in terminals {
+      guard case .local = terminal.executionTarget else { continue }
+      var state = bySession[terminal.tmuxSessionID] ?? .exited
+      if state == .attention, selectedTerminalID == terminal.id, NSApp.isActive {
+        try? await tmuxBackend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+        if let command = try? await tmuxBackend.foregroundCommand(terminal.tmuxSessionID) {
+          state =
+            TmuxSessionRuntimeSnapshot(
+              sessionID: terminal.tmuxSessionID,
+              command: command,
+              paneDead: false,
+              hasBell: false
+            ).state
+        } else {
+          state = .exited
+        }
+      }
+      terminalRuntimeStates[terminal.id] = state
+    }
+  }
+
+  private func handleTerminalRuntimeEvent(
+    terminalID: UUID,
+    event: TerminalSurfaceRuntimeEvent
+  ) {
+    guard terminals.contains(where: { $0.id == terminalID }) else { return }
+    switch event {
+    case .running:
+      terminalRuntimeStates[terminalID] = .running
+    case .attention:
+      if selectedTerminalID == terminalID, NSApp.isActive {
+        terminalRuntimeStates[terminalID] = .attention
+        acknowledgeAttentionIfNeeded(terminalID)
+      } else {
+        terminalRuntimeStates[terminalID] = .attention
+      }
+    case .commandFinished:
+      terminalRuntimeStates[terminalID] =
+        selectedTerminalID == terminalID && NSApp.isActive ? .shell : .attention
+    case .exited:
+      terminalRuntimeStates[terminalID] = .exited
+    }
   }
 }

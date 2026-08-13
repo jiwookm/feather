@@ -54,21 +54,65 @@ struct AgentIcon: View {
 }
 
 struct AgentSessionBadges: View {
-  let kinds: [AgentKind]
+  let sessions: [AgentSessionPresentation]
 
   var body: some View {
     HStack(spacing: 3) {
-      ForEach(Array(kinds.prefix(2).enumerated()), id: \.offset) { _, kind in
-        AgentIcon(kind: kind, size: 14)
+      ForEach(sessions.prefix(2)) { session in
+        AgentIcon(kind: session.kind, size: 14)
+          .overlay(alignment: .bottomTrailing) {
+            TerminalRuntimeBadge(state: session.state, size: 6)
+          }
       }
 
-      if kinds.count > 2 {
+      if sessions.count > 2 {
         Text("+")
           .font(.feather(size: 10, weight: .medium))
       }
     }
     .accessibilityElement(children: .combine)
-    .help("\(kinds.count) active agent session\(kinds.count == 1 ? "" : "s")")
+    .help("\(sessions.count) agent session\(sessions.count == 1 ? "" : "s")")
+  }
+}
+
+struct AgentSessionPresentation: Identifiable {
+  let id: UUID
+  let kind: AgentKind
+  let state: TerminalRuntimeState
+}
+
+struct TerminalRuntimeBadge: View {
+  @Environment(\.colorScheme) private var colorScheme
+  let state: TerminalRuntimeState
+  var size: CGFloat = 7
+
+  private var palette: FeatherPalette { FeatherPalette(colorScheme: colorScheme) }
+
+  var body: some View {
+    Circle()
+      .fill(color)
+      .frame(width: size, height: size)
+      .overlay { Circle().stroke(palette.titlebar, lineWidth: 1) }
+      .accessibilityLabel(label)
+      .help(label)
+  }
+
+  private var color: Color {
+    switch state {
+    case .shell: palette.mutedText
+    case .running: palette.accent
+    case .attention: Color(hex: 0xF0A33A)
+    case .exited: Color(hex: 0xD45555)
+    }
+  }
+
+  private var label: String {
+    switch state {
+    case .shell: "Shell ready"
+    case .running: "Running"
+    case .attention: "Attention requested"
+    case .exited: "Exited"
+    }
   }
 }
 

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 
 public struct TmuxLaunchSpec: Equatable, Sendable {
+  static let stateChangeChannel = "feather-state-change"
   public let executableURL: URL
   public let configURL: URL
   public let socketName: String
@@ -23,6 +24,29 @@ public struct TmuxLaunchSpec: Equatable, Sendable {
     ]
     .map(Self.shellQuote)
     .joined(separator: " ")
+  }
+
+  var signalStateChangeCommand: String {
+    [
+      executableURL.path,
+      "-L", socketName,
+      "-f", configURL.path,
+      "wait-for", "-S", Self.stateChangeChannel,
+    ]
+    .map(Self.shellQuote)
+    .joined(separator: " ")
+  }
+
+  func markAttentionCommand(sessionID: String) -> String {
+    let mark = [
+      executableURL.path,
+      "-L", socketName,
+      "-f", configURL.path,
+      "set-option", "-w", "-t", sessionID, "@feather-attention", "1",
+    ]
+    .map(Self.shellQuote)
+    .joined(separator: " ")
+    return "\(mark); \(signalStateChangeCommand)"
   }
 
   private static func shellQuote(_ value: String) -> String {
@@ -51,6 +75,7 @@ public enum TmuxEnvironment {
       set -as terminal-features ",xterm-ghostty:RGB:focus:title:clipboard"
       set -g focus-events on
       set -g mouse on
+      set-window-option -g monitor-bell on
       set -g status off
       set -g history-limit 10000
       set -g set-clipboard on
@@ -58,6 +83,8 @@ public enum TmuxEnvironment {
       set -g detach-on-destroy on
       set -g pane-border-style "fg=colour8"
       set -g pane-active-border-style "fg=colour8"
+      set-hook -g alert-bell 'wait-for -S feather-state-change'
+      set-hook -g pane-exited 'wait-for -S feather-state-change'
       """
     if (try? String(contentsOf: configURL, encoding: .utf8)) != config {
       try config.write(to: configURL, atomically: true, encoding: .utf8)
@@ -69,6 +96,9 @@ public enum TmuxEnvironment {
         "set-option", "-g", "mouse", "on", ";",
         "set-option", "-g", "pane-border-style", "fg=colour8", ";",
         "set-option", "-g", "pane-active-border-style", "fg=colour8",
+        ";", "set-window-option", "-g", "monitor-bell", "on",
+        ";", "set-hook", "-g", "alert-bell", "wait-for -S feather-state-change",
+        ";", "set-hook", "-g", "pane-exited", "wait-for -S feather-state-change",
       ],
       allowFailure: true
     )
@@ -99,21 +129,27 @@ public enum TmuxEnvironment {
 }
 
 public actor TmuxBackend: TerminalBackend {
-  public let spec: TmuxLaunchSpec
+  private let spec: TmuxLaunchSpec
   private let runner: CommandRunner
+  private let eventRunner: BoundedCommandRunner
 
-  public init(spec: TmuxLaunchSpec, runner: CommandRunner = CommandRunner()) {
+  public init(
+    spec: TmuxLaunchSpec,
+    runner: CommandRunner = CommandRunner(),
+    eventRunner: BoundedCommandRunner = BoundedCommandRunner()
+  ) {
     self.spec = spec
     self.runner = runner
+    self.eventRunner = eventRunner
   }
 
-  public func sessionExists(_ sessionID: String) throws -> Bool {
+  public func sessionExists(_ sessionID: String) async throws -> Bool {
     let result = try run(["has-session", "-t", sessionID], allowFailure: true)
     return result.status == 0
   }
 
-  public func ensureSession(_ sessionID: String, workingDirectory: String) throws {
-    guard try !sessionExists(sessionID) else { return }
+  public func ensureSession(_ sessionID: String, workingDirectory: String) async throws {
+    guard try await sessionExists(sessionID) == false else { return }
     _ = try run([
       "set-environment", "-gu", "NO_COLOR", ";",
       "new-session", "-d", "-s", sessionID,
@@ -121,11 +157,11 @@ public actor TmuxBackend: TerminalBackend {
     ])
   }
 
-  public func foregroundCommand(_ sessionID: String) throws -> String? {
-    try activePane(sessionID)?.command
+  public func foregroundCommand(_ sessionID: String) async throws -> String? {
+    try await activePane(sessionID)?.command
   }
 
-  public func activePane(_ sessionID: String) throws -> TerminalPaneState? {
+  public func activePane(_ sessionID: String) async throws -> TerminalPaneState? {
     let result = try run(
       [
         "display-message", "-p", "-t", sessionID,
@@ -154,7 +190,8 @@ public actor TmuxBackend: TerminalBackend {
       "new-session", "-d", "-s", sessionID,
       "-c", workingDirectory,
       "--", "/usr/bin/env", "-u", "NO_COLOR", "/bin/zsh", "-lic",
-      "\(command); exec /usr/bin/env -u NO_COLOR /bin/zsh -l",
+      "\(command); \(spec.markAttentionCommand(sessionID: sessionID)); "
+        + "exec /usr/bin/env -u NO_COLOR /bin/zsh -l",
     ])
   }
 
@@ -162,8 +199,8 @@ public actor TmuxBackend: TerminalBackend {
     sessionID: String,
     workingDirectory: String,
     direction: TerminalSplitDirection
-  ) throws {
-    try ensureSession(sessionID, workingDirectory: workingDirectory)
+  ) async throws {
+    try await ensureSession(sessionID, workingDirectory: workingDirectory)
     let splitFlag = direction == .right ? "-h" : "-v"
     _ = try run([
       "split-window", splitFlag,
@@ -172,7 +209,7 @@ public actor TmuxBackend: TerminalBackend {
     ])
   }
 
-  public func killPane(_ paneID: String, sessionID: String) throws -> Bool {
+  public func killPane(_ paneID: String, sessionID: String) async throws -> Bool {
     let panes = try run(
       ["list-panes", "-t", sessionID, "-F", "#{pane_id}"],
       allowFailure: true
@@ -184,8 +221,49 @@ public actor TmuxBackend: TerminalBackend {
     return true
   }
 
-  public func killSession(_ sessionID: String) throws {
-    _ = try run(["kill-session", "-t", sessionID], allowFailure: true)
+  public func killSession(_ sessionID: String) async throws {
+    guard try await sessionExists(sessionID) else { return }
+    _ = try run(["kill-session", "-t", sessionID])
+  }
+
+  public func runtimeSnapshots() throws -> [TmuxSessionRuntimeSnapshot] {
+    let result = try run(
+      [
+        "list-panes", "-a", "-f", "#{pane_active}", "-F",
+        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}",
+      ],
+      allowFailure: true
+    )
+    guard result.status == 0 else { return [] }
+    return TmuxSessionRuntimeParser.parse(result.text)
+  }
+
+  public func acknowledgeAttention(sessionID: String) throws {
+    _ = try run(
+      ["set-option", "-w", "-u", "-t", sessionID, "@feather-attention"],
+      allowFailure: true
+    )
+    _ = try run(["kill-session", "-C", "-t", sessionID], allowFailure: true)
+  }
+
+  public func waitForStateChange() async throws {
+    let output = try await eventRunner.run(
+      spec.executableURL.path,
+      arguments: [
+        "-L", spec.socketName, "-f", spec.configURL.path,
+        "wait-for", TmuxLaunchSpec.stateChangeChannel,
+      ],
+      maximumOutputBytes: 64 * 1_024,
+      timeout: 7 * 24 * 60 * 60
+    )
+    guard output.status == 0 else {
+      throw BoundedCommandFailure(
+        executable: spec.executableURL.path,
+        arguments: ["wait-for", TmuxLaunchSpec.stateChangeChannel],
+        status: output.status,
+        stderr: output.stderrText
+      )
+    }
   }
 
   private func run(_ arguments: [String], allowFailure: Bool = false) throws -> CommandOutput {
@@ -194,5 +272,20 @@ public actor TmuxBackend: TerminalBackend {
       arguments: ["-L", spec.socketName, "-f", spec.configURL.path] + arguments,
       allowFailure: allowFailure
     )
+  }
+}
+
+enum TmuxSessionRuntimeParser {
+  static func parse(_ text: String) -> [TmuxSessionRuntimeSnapshot] {
+    text.split(whereSeparator: \.isNewline).compactMap { line in
+      let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+      guard fields.count >= 4 else { return nil }
+      return TmuxSessionRuntimeSnapshot(
+        sessionID: String(fields[0]),
+        command: String(fields[1]),
+        paneDead: fields[2] == "1",
+        hasBell: fields[3] == "1" || (fields.count >= 5 && fields[4] == "1")
+      )
+    }
   }
 }

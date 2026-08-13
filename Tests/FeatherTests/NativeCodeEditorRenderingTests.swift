@@ -12,7 +12,8 @@ struct NativeCodeEditorRenderingTests {
         text: .constant("let answer = 42\nprint(answer)\n"),
         path: "Example.swift",
         isDark: isDark,
-        wrapsLines: false
+        wrapsLines: false,
+        revealLine: nil
       )
       let host = NSHostingView(rootView: editor)
       host.frame = NSRect(x: 0, y: 0, width: 640, height: 360)
