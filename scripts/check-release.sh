@@ -14,7 +14,7 @@ cd "$project_root"
     "$script_directory/package-release.sh" \
     "$script_directory/performance-report.sh"
 /usr/bin/swift format lint --recursive --strict Sources Tests Package.swift
-/usr/bin/swift test
+/usr/bin/swift test --no-parallel
 "$script_directory/build-app.sh"
 /usr/bin/git diff --check
 
