@@ -53,7 +53,8 @@ struct NativeDiffViewerRenderingTests {
             pixelCount(
               in: bitmap,
               hexes: [isDark ? 0xEF5350 : 0xB42318],
-              xRange: 0..<midpoint
+              xRange: 0..<midpoint,
+              samplingStride: 1
             ) > 10,
             "Original split pane did not render deletions"
           )
@@ -61,7 +62,8 @@ struct NativeDiffViewerRenderingTests {
             pixelCount(
               in: bitmap,
               hexes: [isDark ? 0xADDB67 : 0x357A14],
-              xRange: midpoint..<bitmap.pixelsWide
+              xRange: midpoint..<bitmap.pixelsWide,
+              samplingStride: 1
             ) > 10,
             "Modified split pane did not render additions"
           )
@@ -73,23 +75,28 @@ struct NativeDiffViewerRenderingTests {
   private func pixelCount(
     in bitmap: NSBitmapImageRep,
     hexes: [UInt32],
-    xRange: Range<Int>? = nil
+    xRange: Range<Int>? = nil,
+    samplingStride: Int = 2
   ) -> Int {
     let expected = hexes.compactMap { NSColor(hex: $0).usingColorSpace(.sRGB) }
     let horizontalRange = xRange ?? 0..<bitmap.pixelsWide
-    return stride(from: horizontalRange.lowerBound, to: horizontalRange.upperBound, by: 2)
-      .reduce(0) { count, x in
-        count
-          + stride(from: 0, to: bitmap.pixelsHigh, by: 2).filter { y in
-            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
-              return false
-            }
-            return expected.contains { target in
-              abs(color.redComponent - target.redComponent) < 0.16
-                && abs(color.greenComponent - target.greenComponent) < 0.16
-                && abs(color.blueComponent - target.blueComponent) < 0.16
-            }
-          }.count
-      }
+    return stride(
+      from: horizontalRange.lowerBound,
+      to: horizontalRange.upperBound,
+      by: samplingStride
+    )
+    .reduce(0) { count, x in
+      count
+        + stride(from: 0, to: bitmap.pixelsHigh, by: samplingStride).filter { y in
+          guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
+            return false
+          }
+          return expected.contains { target in
+            abs(color.redComponent - target.redComponent) < 0.16
+              && abs(color.greenComponent - target.greenComponent) < 0.16
+              && abs(color.blueComponent - target.blueComponent) < 0.16
+          }
+        }.count
+    }
   }
 }

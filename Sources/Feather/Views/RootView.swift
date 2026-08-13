@@ -7,6 +7,7 @@ struct RootView: View {
   @Environment(\.colorScheme) private var colorScheme
   @State private var isFullScreen = false
   @State private var quickOpenVisible = false
+  @State private var repositorySearchVisible = false
   @StateObject private var document = WorkspaceDocumentController()
 
   private var palette: FeatherPalette { FeatherPalette(colorScheme: colorScheme) }
@@ -77,6 +78,18 @@ struct RootView: View {
         )
         .id(rootPath)
         .transition(.opacity)
+      } else if repositorySearchVisible, let rootPath = model.selectedWorktree?.path {
+        RepositorySearchView(
+          rootPath: rootPath,
+          onOpen: { match in
+            let path = URL(fileURLWithPath: rootPath).appendingPathComponent(match.path).path
+            document.openFile(rootPath: rootPath, path: path, line: match.line)
+            repositorySearchVisible = false
+          },
+          onDismiss: { repositorySearchVisible = false }
+        )
+        .id(rootPath)
+        .transition(.opacity)
       }
     }
     .task { model.start() }
@@ -115,19 +128,32 @@ struct RootView: View {
     }
     .onReceive(NotificationCenter.default.publisher(for: .featherQuickOpenRequested)) { _ in
       guard model.selectedWorktree != nil else { return }
+      repositorySearchVisible = false
       quickOpenVisible.toggle()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: .featherRepositorySearchRequested)) { _ in
+      guard model.selectedWorktree != nil else { return }
+      quickOpenVisible = false
+      repositorySearchVisible.toggle()
     }
     .onChange(of: model.selectedWorktreePath) { _, selectedPath in
       if let request = document.request, request.rootPath != selectedPath {
         document.requestCloseAll()
       }
       quickOpenVisible = false
+      repositorySearchVisible = false
     }
     .alert(item: $model.presentedAlert) { alert in
       switch alert {
       case .error(let message):
         Alert(
           title: Text("Feather"),
+          message: Text(message),
+          dismissButton: .default(Text("OK"))
+        )
+      case .message(let title, let message):
+        Alert(
+          title: Text(title),
           message: Text(message),
           dismissButton: .default(Text("OK"))
         )
@@ -169,6 +195,18 @@ struct RootView: View {
           ),
           primaryButton: .default(Text("Return for Reuse")) {
             model.confirmReturnWorktree(repository: repository, worktree: worktree)
+          },
+          secondaryButton: .cancel()
+        )
+      case .handoffTerminal(let terminal, let target):
+        Alert(
+          title: Text("Handoff to \(target.host)?"),
+          message: Text(
+            "Feather will require a clean branch whose commit exactly matches origin, prepare a "
+              + "new remote checkout and tmux session, then end this local tmux session."
+          ),
+          primaryButton: .destructive(Text("Handoff")) {
+            model.confirmRemoteHandoff(terminal, target: target)
           },
           secondaryButton: .cancel()
         )

@@ -186,6 +186,7 @@ public struct TerminalRecord: Codable, Equatable, Identifiable, Sendable {
   public var title: String
   public var order: Int
   public let tmuxSessionID: String
+  public var executionTarget: TerminalExecutionTarget
 
   public init(
     id: UUID = UUID(),
@@ -193,17 +194,116 @@ public struct TerminalRecord: Codable, Equatable, Identifiable, Sendable {
     worktreePath: String,
     title: String,
     order: Int,
-    tmuxSessionID: String? = nil
+    tmuxSessionID: String? = nil,
+    executionTarget: TerminalExecutionTarget = .local
   ) {
     self.id = id
     self.repositoryID = repositoryID
     self.worktreePath = worktreePath
     self.title = title
     self.order = order
+    self.executionTarget = executionTarget
     self.tmuxSessionID =
       tmuxSessionID
       ?? "feather-\(id.uuidString.lowercased().replacingOccurrences(of: "-", with: ""))"
   }
+
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case repositoryID
+    case worktreePath
+    case title
+    case order
+    case tmuxSessionID
+    case executionTarget
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(UUID.self, forKey: .id)
+    repositoryID = try container.decode(UUID.self, forKey: .repositoryID)
+    worktreePath = try container.decode(String.self, forKey: .worktreePath)
+    title = try container.decode(String.self, forKey: .title)
+    order = try container.decode(Int.self, forKey: .order)
+    tmuxSessionID = try container.decode(String.self, forKey: .tmuxSessionID)
+    executionTarget =
+      try container.decodeIfPresent(TerminalExecutionTarget.self, forKey: .executionTarget)
+      ?? .local
+  }
+}
+
+public struct SSHRemoteTarget: Codable, Equatable, Sendable {
+  public var host: String
+  public var port: Int
+  public var rootPath: String
+
+  public init(host: String = "", port: Int = 22, rootPath: String = "") {
+    self.host = host
+    self.port = port
+    self.rootPath = rootPath
+  }
+
+  public var isConfigured: Bool {
+    !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && (1...65_535).contains(port)
+      && rootPath.hasPrefix("/")
+  }
+}
+
+public struct SSHRemoteTerminal: Codable, Equatable, Sendable {
+  public let target: SSHRemoteTarget
+  public let workingDirectory: String
+  public let tmuxConfigPath: String
+  public let tmuxSocketName: String
+
+  public init(
+    target: SSHRemoteTarget,
+    workingDirectory: String,
+    tmuxConfigPath: String,
+    tmuxSocketName: String = "feather"
+  ) {
+    self.target = target
+    self.workingDirectory = workingDirectory
+    self.tmuxConfigPath = tmuxConfigPath
+    self.tmuxSocketName = tmuxSocketName
+  }
+}
+
+public enum TerminalExecutionTarget: Codable, Equatable, Sendable {
+  case local
+  case ssh(SSHRemoteTerminal)
+}
+
+public enum TerminalRuntimeState: String, Equatable, Sendable {
+  case shell
+  case running
+  case attention
+  case exited
+}
+
+public struct TmuxSessionRuntimeSnapshot: Equatable, Sendable {
+  public let sessionID: String
+  public let command: String
+  public let paneDead: Bool
+  public let hasBell: Bool
+
+  public init(sessionID: String, command: String, paneDead: Bool, hasBell: Bool) {
+    self.sessionID = sessionID
+    self.command = command
+    self.paneDead = paneDead
+    self.hasBell = hasBell
+  }
+
+  public var state: TerminalRuntimeState {
+    if paneDead { return .exited }
+    if hasBell { return .attention }
+    let executable = URL(fileURLWithPath: command).lastPathComponent.lowercased()
+    return Self.shellCommands.contains(executable) ? .shell : .running
+  }
+
+  private static let shellCommands: Set<String> = [
+    "bash", "dash", "fish", "ksh", "login", "sh", "tcsh", "xonsh", "zsh",
+  ]
 }
 
 public enum TerminalSplitDirection: Equatable, Sendable {
@@ -223,24 +323,23 @@ public struct TerminalPaneState: Equatable, Sendable {
   }
 }
 
-/// Renderer-independent terminal lifecycle used by the local tmux backend and
-/// intended for a future SSH/tmux implementation.
+/// Renderer-independent terminal lifecycle shared by local and SSH/tmux sessions.
 public protocol TerminalBackend: Actor {
-  func sessionExists(_ sessionID: String) throws -> Bool
-  func ensureSession(_ sessionID: String, workingDirectory: String) throws
-  func foregroundCommand(_ sessionID: String) throws -> String?
-  func activePane(_ sessionID: String) throws -> TerminalPaneState?
+  func sessionExists(_ sessionID: String) async throws -> Bool
+  func ensureSession(_ sessionID: String, workingDirectory: String) async throws
+  func foregroundCommand(_ sessionID: String) async throws -> String?
+  func activePane(_ sessionID: String) async throws -> TerminalPaneState?
   func splitPane(
     sessionID: String,
     workingDirectory: String,
     direction: TerminalSplitDirection
-  ) throws
-  func killPane(_ paneID: String, sessionID: String) throws -> Bool
-  func killSession(_ sessionID: String) throws
+  ) async throws
+  func killPane(_ paneID: String, sessionID: String) async throws -> Bool
+  func killSession(_ sessionID: String) async throws
 }
 
 public struct ApplicationSnapshot: Codable, Equatable, Sendable {
-  public static let currentVersion = 4
+  public static let currentVersion = 5
 
   public var version: Int
   public var repositories: [RepositoryRecord]
@@ -252,6 +351,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
   public var selectedTerminalID: UUID?
   public var sidebarVisible: Bool
   public var inspectorVisible: Bool
+  public var remoteTarget: SSHRemoteTarget
 
   public init(
     version: Int = ApplicationSnapshot.currentVersion,
@@ -263,7 +363,8 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     selectedWorktreePath: String? = nil,
     selectedTerminalID: UUID? = nil,
     sidebarVisible: Bool = true,
-    inspectorVisible: Bool = false
+    inspectorVisible: Bool = false,
+    remoteTarget: SSHRemoteTarget = SSHRemoteTarget()
   ) {
     self.version = version
     self.repositories = repositories
@@ -275,6 +376,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     self.selectedTerminalID = selectedTerminalID
     self.sidebarVisible = sidebarVisible
     self.inspectorVisible = inspectorVisible
+    self.remoteTarget = remoteTarget
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -288,6 +390,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     case selectedTerminalID
     case sidebarVisible
     case inspectorVisible
+    case remoteTarget
   }
 
   public init(from decoder: Decoder) throws {
@@ -305,6 +408,9 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     selectedTerminalID = try container.decodeIfPresent(UUID.self, forKey: .selectedTerminalID)
     sidebarVisible = try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
     inspectorVisible = try container.decodeIfPresent(Bool.self, forKey: .inspectorVisible) ?? false
+    remoteTarget =
+      try container.decodeIfPresent(SSHRemoteTarget.self, forKey: .remoteTarget)
+      ?? SSHRemoteTarget()
   }
 
 }

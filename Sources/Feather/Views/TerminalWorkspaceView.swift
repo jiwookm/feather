@@ -24,7 +24,7 @@ struct TerminalWorkspaceView: View {
         availableWorktreeView
       } else if let terminal = model.selectedTerminal {
         TerminalSurfaceContainer(terminal: terminal)
-          .id(terminal.id)
+          .id(surfaceIdentity(terminal))
       } else {
         noTerminalView
       }
@@ -114,6 +114,7 @@ struct TerminalWorkspaceView: View {
         Image(systemName: TerminalLaunch.terminal.systemImage)
           .font(.system(size: 11, weight: .medium))
       }
+      TerminalRuntimeBadge(state: model.runtimeState(for: terminal), size: 7)
       Text(terminal.title)
         .font(.feather(size: 14, weight: selected ? .medium : .regular))
         .lineLimit(1)
@@ -135,7 +136,7 @@ struct TerminalWorkspaceView: View {
     }
     .contentShape(Rectangle())
     .onTapGesture { model.selectTerminal(terminal.id) }
-    .help(terminal.worktreePath)
+    .help(terminalHelp(terminal))
   }
 
   private var noWorktreeView: some View {
@@ -267,6 +268,24 @@ struct TerminalWorkspaceView: View {
     terminalLauncherPresented = false
     model.newTerminal(launch: launch)
   }
+
+  private func surfaceIdentity(_ terminal: TerminalRecord) -> String {
+    switch terminal.executionTarget {
+    case .local:
+      "\(terminal.id.uuidString)-local"
+    case .ssh(let remote):
+      "\(terminal.id.uuidString)-ssh-\(remote.target.host)-\(remote.workingDirectory)"
+    }
+  }
+
+  private func terminalHelp(_ terminal: TerminalRecord) -> String {
+    switch terminal.executionTarget {
+    case .local:
+      terminal.worktreePath
+    case .ssh(let remote):
+      "\(remote.target.host):\(remote.workingDirectory)"
+    }
+  }
 }
 
 private struct TerminalSurfaceContainer: View {
@@ -288,6 +307,9 @@ private struct TerminalSurfaceContainer: View {
     }
     .task {
       handle = model.terminalRegistry.handle(for: terminal, appearance: model.appearance)
+      if handle != nil {
+        model.terminalSurfaceDidAttach(terminal)
+      }
     }
     .onDisappear {
       handle = nil

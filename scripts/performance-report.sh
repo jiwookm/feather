@@ -87,6 +87,21 @@ if [[ -n "$repository_path" ]]; then
   changes_timing_file=$(/usr/bin/mktemp -t feather-changes-times)
   quick_open_timing_file=$(/usr/bin/mktemp -t feather-quick-open-times)
   review_timing_file=$(/usr/bin/mktemp -t feather-review-times)
+  search_timing_file=""
+  ripgrep_executable=""
+  for candidate in /opt/homebrew/bin/rg /usr/local/bin/rg; do
+    if [[ -x "$candidate" ]]; then
+      ripgrep_executable=$candidate
+      break
+    fi
+  done
+  if [[ -z "$ripgrep_executable" ]]; then
+    ripgrep_executable=${commands[rg]:-}
+  fi
+  if [[ -n "$ripgrep_executable" ]]; then
+    search_timing_file=$(/usr/bin/mktemp -t feather-search-times)
+    temporary_files+=("$search_timing_file")
+  fi
   temporary_files+=(
     "$timing_file"
     "$changes_timing_file"
@@ -110,6 +125,15 @@ if [[ -n "$repository_path" ]]; then
   function quick_open_files {
     GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /usr/bin/git -C "$repository_path" \
       ls-files -z --cached --others --exclude-standard >/dev/null
+  }
+
+  function repository_search {
+    local search_status=0
+    RIPGREP_CONFIG_PATH=/dev/null "$ripgrep_executable" \
+      --json --fixed-strings --smart-case --line-number --column --hidden \
+      --glob '!.git' --max-filesize 2M --max-count 20 --threads 2 -- \
+      "${FEATHER_PERF_SEARCH_QUERY:-import}" "$repository_path" >/dev/null || search_status=$?
+    (( search_status == 0 || search_status == 1 ))
   }
 
   review_base=$(GIT_OPTIONAL_LOCKS=0 /usr/bin/git -C "$repository_path" \
@@ -150,6 +174,9 @@ if [[ -n "$repository_path" ]]; then
     status --porcelain=v2 --branch -z --untracked-files=all >/dev/null
   refresh_changes
   quick_open_files
+  if [[ -n "$ripgrep_executable" ]]; then
+    repository_search
+  fi
   if (( review_available )); then
     refresh_branch_review
   fi
@@ -174,6 +201,14 @@ if [[ -n "$repository_path" ]]; then
     /usr/bin/perl -e 'printf "%.3f\n", 1000 * ($ARGV[1] - $ARGV[0])' \
       "$started" "$finished" >> "$quick_open_timing_file"
 
+    if [[ -n "$ripgrep_executable" ]]; then
+      started=$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.9f", time')
+      repository_search
+      finished=$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.9f", time')
+      /usr/bin/perl -e 'printf "%.3f\n", 1000 * ($ARGV[1] - $ARGV[0])' \
+        "$started" "$finished" >> "$search_timing_file"
+    fi
+
     if (( review_available )); then
       started=$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.9f", time')
       refresh_branch_review
@@ -191,6 +226,10 @@ if [[ -n "$repository_path" ]]; then
   changes_mean=$(/usr/bin/awk '{sum += $1} END {printf "%.3f", sum / NR}' "$changes_timing_file")
   sorted_quick_open_times=(${(f)"$(/usr/bin/sort -n "$quick_open_timing_file")"})
   quick_open_mean=$(/usr/bin/awk '{sum += $1} END {printf "%.3f", sum / NR}' "$quick_open_timing_file")
+  if [[ -n "$ripgrep_executable" ]]; then
+    sorted_search_times=(${(f)"$(/usr/bin/sort -n "$search_timing_file")"})
+    search_mean=$(/usr/bin/awk '{sum += $1} END {printf "%.3f", sum / NR}' "$search_timing_file")
+  fi
 
   print "repository=$repository_path"
   print "tracked_files=$tracked_files"
@@ -212,6 +251,17 @@ if [[ -n "$repository_path" ]]; then
   print "quick_open_mean_ms=$quick_open_mean"
   print "quick_open_p95_ms=${sorted_quick_open_times[$p95_index]}"
   print "quick_open_max_ms=${sorted_quick_open_times[-1]}"
+  if [[ -n "$ripgrep_executable" ]]; then
+    print "repository_search_query=${FEATHER_PERF_SEARCH_QUERY:-import}"
+    print "repository_search_runs=$runs"
+    print "repository_search_min_ms=${sorted_search_times[1]}"
+    print "repository_search_median_ms=${sorted_search_times[$median_index]}"
+    print "repository_search_mean_ms=$search_mean"
+    print "repository_search_p95_ms=${sorted_search_times[$p95_index]}"
+    print "repository_search_max_ms=${sorted_search_times[-1]}"
+  else
+    print "repository_search=unavailable (ripgrep not installed)"
+  fi
   if (( review_available )); then
     sorted_review_times=(${(f)"$(/usr/bin/sort -n "$review_timing_file")"})
     review_mean=$(/usr/bin/awk '{sum += $1} END {printf "%.3f", sum / NR}' "$review_timing_file")

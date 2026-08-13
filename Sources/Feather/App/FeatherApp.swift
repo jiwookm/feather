@@ -45,6 +45,11 @@ struct FeatherApp: App {
         }
         .keyboardShortcut("p", modifiers: .command)
         .disabled(model.selectedWorktree == nil)
+        Button("Search Repository…") {
+          NotificationCenter.default.post(name: .featherRepositorySearchRequested, object: nil)
+        }
+        .keyboardShortcut("f", modifiers: [.command, .shift])
+        .disabled(model.selectedWorktree == nil)
       }
       CommandGroup(replacing: .saveItem) {
         Button("Save File") {
@@ -74,6 +79,8 @@ struct FeatherApp: App {
         Divider()
         Button("Reveal Worktree in Finder") { model.revealSelectedWorktree() }
           .disabled(model.selectedWorktree == nil)
+        Button("Handoff to Remote…") { model.requestRemoteHandoff() }
+          .disabled(!model.canHandoffSelectedTerminal)
         Divider()
         Button("Refresh Worktrees") { model.refresh() }
           .keyboardShortcut("r", modifiers: .command)

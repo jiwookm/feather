@@ -40,6 +40,7 @@ struct TmuxBackendTests {
     #expect(config.contains("set -g pane-border-style \"fg=colour8\""))
     #expect(config.contains("set -g pane-active-border-style \"fg=colour8\""))
     #expect(config.contains("set -g mouse on"))
+    #expect(config.contains("set-hook -g alert-bell 'wait-for -S feather-state-change'"))
     let liveMouse = try runner.run(
       tmux.path,
       arguments: ["-L", socketName, "show-options", "-gv", "mouse"]
@@ -111,6 +112,8 @@ struct TmuxBackendTests {
     #expect(finalPane.totalCount == 1)
     #expect(!(try await backend.killPane(finalPane.id, sessionID: sessionID)))
     #expect(try await backend.sessionExists(sessionID))
+    try await backend.acknowledgeAttention(sessionID: sessionID)
+    #expect(try await backend.sessionExists(sessionID))
 
     let markerURL = temporaryRoot.appendingPathComponent("agent-launched")
     try await backend.launchCommand(
@@ -122,8 +125,38 @@ struct TmuxBackendTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(fileManager.fileExists(atPath: markerURL.path))
+    var agentState: TerminalRuntimeState?
+    for _ in 0..<100 where agentState != .attention {
+      agentState = try await backend.runtimeSnapshots()
+        .first { $0.sessionID == "agent-session" }?.state
+      if agentState != .attention {
+        try await Task.sleep(for: .milliseconds(50))
+      }
+    }
+    #expect(agentState == .attention)
+    try await backend.acknowledgeAttention(sessionID: "agent-session")
+    var resumedState: TerminalRuntimeState?
+    for _ in 0..<100 where resumedState != .shell {
+      resumedState = try await backend.runtimeSnapshots()
+        .first { $0.sessionID == "agent-session" }?.state
+      if resumedState != .shell {
+        try await Task.sleep(for: .milliseconds(50))
+      }
+    }
+    #expect(resumedState == .shell)
 
     try await backend.killSession(sessionID)
     #expect(!(try await backend.sessionExists(sessionID)))
+  }
+
+  @Test
+  func parsesAndClassifiesRuntimeSnapshots() {
+    let snapshots = TmuxSessionRuntimeParser.parse(
+      "shell\tzsh\t0\t0\nagent\tcodex\t0\t0\nbell\tclaude\t0\t1\n"
+        + "marked\tzsh\t0\t0\t1\ndead\tzsh\t1\t0\n"
+    )
+
+    #expect(snapshots.map(\.sessionID) == ["shell", "agent", "bell", "marked", "dead"])
+    #expect(snapshots.map(\.state) == [.shell, .running, .attention, .attention, .exited])
   }
 }

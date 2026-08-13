@@ -3,6 +3,16 @@ import SwiftUI
 
 struct SettingsView: View {
   @ObservedObject var model: AppModel
+  @State private var remoteHost: String
+  @State private var remotePort: Int
+  @State private var remoteRoot: String
+
+  init(model: AppModel) {
+    self.model = model
+    _remoteHost = State(initialValue: model.remoteTarget.host)
+    _remotePort = State(initialValue: model.remoteTarget.port)
+    _remoteRoot = State(initialValue: model.remoteTarget.rootPath)
+  }
 
   var body: some View {
     Form {
@@ -27,6 +37,7 @@ struct SettingsView: View {
         LabeledContent("Save open file", value: "⌘⇧S")
         LabeledContent("Toggle project sidebar", value: "⌘S")
         LabeledContent("Toggle inspector", value: "⌘E")
+        LabeledContent("Search repository", value: "⌘⇧F")
       }
 
       Section("Terminals") {
@@ -40,10 +51,42 @@ struct SettingsView: View {
       Section("Worktrees") {
         LabeledContent("New checkouts", value: model.worktreesRoot.path)
       }
+
+      Section("Remote Handoff") {
+        TextField("SSH host or alias", text: $remoteHost)
+        HStack {
+          TextField("Port", value: $remotePort, format: .number)
+            .frame(width: 90)
+          TextField("Absolute remote root", text: $remoteRoot)
+        }
+        HStack {
+          Button("Save") { model.saveRemoteTarget(draftRemoteTarget) }
+            .disabled(!hasRemoteDraft || model.isBusy)
+          Button("Test Connection") { model.testRemoteTarget(draftRemoteTarget) }
+            .disabled(!hasRemoteDraft || model.isBusy)
+          if model.isBusy { ProgressView().controlSize(.small) }
+        }
+        Text(
+          "Use an OpenSSH alias when possible. The host must already have Git, tmux, repository "
+            + "credentials, and your agent CLI authentication. Feather does not store passwords "
+            + "or enable SSH agent forwarding."
+        )
+        .font(.feather(size: 11))
+        .foregroundStyle(.secondary)
+      }
     }
     .font(.feather(size: 13))
     .formStyle(.grouped)
     .padding(8)
-    .frame(width: 520, height: 430)
+    .frame(width: 560, height: 600)
+  }
+
+  private var hasRemoteDraft: Bool {
+    !remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !remoteRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private var draftRemoteTarget: SSHRemoteTarget {
+    SSHRemoteTarget(host: remoteHost, port: remotePort, rootPath: remoteRoot)
   }
 }

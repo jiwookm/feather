@@ -2,7 +2,7 @@
 
 Feather treats idle cost as a product constraint. Measurements are taken on a release arm64 build,
 with the same window size and selected terminal before and after a feature change. The local helper
-script records the bundle, process, private tmux, and optional Git-status baselines without launching
+script records the bundle, process, private tmux, and optional Git/search baselines without launching
 the app or changing repository state:
 
 ```sh
@@ -77,6 +77,23 @@ desktop app was not relaunched. Repeat the fresh-launch measurement on the M1 re
 release candidate; command latency, release size, architecture, tests, and hidden-work lifecycles
 were verified without controlling the user's desktop.
 
+The repository-search, terminal-state, release, and clean-SSH-handoff checkpoint was captured on
+2026-08-13 on the same M1 Pro with 16 GB RAM. This development checkout contains 65 tracked files;
+the before and after command samples each used 20 warm runs:
+
+- The arm64 release bundle moved from 19,284 KiB to 19,992 KiB, a 708 KiB increase that remains
+  below the 1 MiB payload-review threshold.
+- Git status moved from 20.1 ms median / 21.5 ms p95 to 19.2 ms / 21.0 ms. Changes refresh moved
+  from 33.2 ms / 48.0 ms to 36.1 ms / 40.9 ms; Quick Open moved from 19.0 ms / 21.4 ms to
+  18.5 ms / 20.9 ms; Branch Review moved from 43.2 ms / 51.5 ms to 45.7 ms / 52.4 ms.
+- A representative bounded literal repository search measured 13.5 ms median and 14.7 ms p95.
+  This small checkout validates the command path but does not replace the required 20k-file release
+  candidate measurement.
+- The app was not running in either sample, so no live UI RSS comparison is claimed. Repository
+  search owns a subprocess only while its overlay has a two-or-more-character query. Runtime state
+  owns at most one blocked tmux waiter while a local terminal exists. SSH and release tooling do no
+  background work.
+
 ## Feature budgets
 
 - A hidden inspector performs no timers, filesystem reads, Git/GitHub commands, network requests,
@@ -103,6 +120,9 @@ were verified without controlling the user's desktop.
 - A feature that adds more than 1 MB to the compressed app payload needs explicit justification.
 - Quick Open filename enumeration should remain under 150 ms p95 on the reference 20k-file
   checkout. Its paths and match task must be gone when the picker closes.
+- Repository search should remain under 250 ms p95 for a common literal on the reference 20k-file
+  checkout. It is limited to two ripgrep threads, a 2 MB file ceiling, a 2 MB output ceiling, 200
+  displayed matches, and ten seconds even on an adversarial tree; dismissal cancels the child.
 - Branch Review headers should remain under 250 ms p95 on the reference checkout. File bodies load
   only on selection and keep the existing 1 MB patch ceiling.
 - Resource sampling should remain under 50 ms p95 and run only while Usage is visible; no snapshot,
