@@ -82,6 +82,14 @@ struct GitHubServiceTests {
   }
 
   @Test
+  func hidesBlankAndRedundantCheckWorkflowNames() {
+    #expect(check(workflow: nil).distinctWorkflowName == nil)
+    #expect(check(workflow: "  \n").distinctWorkflowName == nil)
+    #expect(check(name: "Vercel", workflow: "vercel").distinctWorkflowName == nil)
+    #expect(check(name: "Build", workflow: " CI ").distinctWorkflowName == "CI")
+  }
+
+  @Test
   func mergePinsTheVerifiedHeadCommitAndUsesSquash() async throws {
     let fixture = try makeExecutable(
       """
@@ -143,13 +151,17 @@ struct GitHubServiceTests {
     )
   }
 
-  private func check(name: String = "test", bucket: String) -> GitHubCheck {
+  private func check(
+    name: String = "test",
+    bucket: String = "pass",
+    workflow: String? = "CI"
+  ) -> GitHubCheck {
     GitHubCheck(
       name: name,
       state: bucket.uppercased(),
       bucket: bucket,
       link: nil,
-      workflow: "CI"
+      workflow: workflow
     )
   }
 

@@ -20,6 +20,15 @@ public struct GitHubPullRequest: Codable, Equatable, Sendable {
 
 public struct GitHubCheck: Codable, Equatable, Identifiable, Sendable {
   public var id: String { "\(workflow ?? ""):\(name):\(link ?? "")" }
+  public var distinctWorkflowName: String? {
+    guard let workflow else { return nil }
+    let normalized = workflow.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty,
+      normalized.localizedCaseInsensitiveCompare(normalizedName) != .orderedSame
+    else { return nil }
+    return normalized
+  }
   public let name: String
   public let state: String
   public let bucket: String

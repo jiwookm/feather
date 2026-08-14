@@ -404,7 +404,6 @@ struct GitHubInspectorView: View {
   }
 
   private func checkSubtitle(_ check: GitHubCheck) -> String? {
-    guard let workflow = check.workflow, workflow != check.name else { return nil }
-    return workflow
+    check.distinctWorkflowName
   }
 }
