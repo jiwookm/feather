@@ -41,6 +41,7 @@ struct AgentIcon: View {
         Image(nsImage: image)
           .renderingMode(kind == .codex ? .template : .original)
           .resizable()
+          .interpolation(.high)
       } else {
         Image(systemName: kind.fallbackSymbol)
           .resizable()
@@ -61,7 +62,9 @@ struct AgentSessionBadges: View {
       ForEach(sessions.prefix(2)) { session in
         AgentIcon(kind: session.kind, size: 14)
           .overlay(alignment: .bottomTrailing) {
-            TerminalRuntimeBadge(state: session.state, size: 6)
+            if session.state.showsNotificationBadge {
+              TerminalRuntimeBadge(state: session.state, size: 6)
+            }
           }
       }
 
@@ -81,6 +84,15 @@ struct AgentSessionPresentation: Identifiable {
   let state: TerminalRuntimeState
 }
 
+extension TerminalRuntimeState {
+  var showsNotificationBadge: Bool {
+    switch self {
+    case .attention, .exited: true
+    case .shell, .running: false
+    }
+  }
+}
+
 struct TerminalRuntimeBadge: View {
   @Environment(\.colorScheme) private var colorScheme
   let state: TerminalRuntimeState
@@ -88,21 +100,23 @@ struct TerminalRuntimeBadge: View {
 
   private var palette: FeatherPalette { FeatherPalette(colorScheme: colorScheme) }
 
+  @ViewBuilder
   var body: some View {
-    Circle()
-      .fill(color)
-      .frame(width: size, height: size)
-      .overlay { Circle().stroke(palette.titlebar, lineWidth: 1) }
-      .accessibilityLabel(label)
-      .help(label)
+    if state.showsNotificationBadge {
+      Circle()
+        .fill(color)
+        .frame(width: size, height: size)
+        .overlay { Circle().stroke(palette.titlebar, lineWidth: 1) }
+        .accessibilityLabel(label)
+        .help(label)
+    }
   }
 
   private var color: Color {
     switch state {
-    case .shell: palette.mutedText
-    case .running: palette.accent
     case .attention: Color(hex: 0xF0A33A)
     case .exited: Color(hex: 0xD45555)
+    case .shell, .running: .clear
     }
   }
 
@@ -118,8 +132,10 @@ struct TerminalRuntimeBadge: View {
 
 @MainActor
 private enum AgentIconAssets {
-  static let claude = load("Claude")
-  static let codex = load("OpenAI", template: true)
+  static let claude = load("Claude", extension: "svg") ?? load("Claude", extension: "png")
+  static let codex =
+    load("OpenAI", extension: "svg", template: true)
+    ?? load("OpenAI", extension: "png", template: true)
 
   static func image(for kind: AgentKind) -> NSImage? {
     switch kind {
@@ -128,11 +144,15 @@ private enum AgentIconAssets {
     }
   }
 
-  private static func load(_ name: String, template: Bool = false) -> NSImage? {
+  private static func load(
+    _ name: String,
+    extension fileExtension: String,
+    template: Bool = false
+  ) -> NSImage? {
     guard
       let url = Bundle.main.url(
         forResource: name,
-        withExtension: "png",
+        withExtension: fileExtension,
         subdirectory: "AgentIcons"
       ),
       let image = NSImage(contentsOf: url)
