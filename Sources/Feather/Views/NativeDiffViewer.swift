@@ -336,7 +336,7 @@ private enum DiffAttributedText {
   ) -> NSAttributedString {
     let result = NSMutableAttributedString()
     let highlightsCode = shouldHighlight(document)
-    for line in document.lines {
+    for line in document.lines where !isRedundantFileHeader(line) {
       let gutter = "\(padded(line.oldLine)) \(padded(line.newLine))  \(marker(line.kind)) "
       append(
         line,
@@ -360,7 +360,7 @@ private enum DiffAttributedText {
     let left = NSMutableAttributedString()
     let right = NSMutableAttributedString()
     let highlightsCode = shouldHighlight(document)
-    for row in document.splitRows {
+    for row in document.splitRows where !isRedundantFileHeader(row.left) {
       let leftRow = NSMutableAttributedString()
       let rightRow = NSMutableAttributedString()
       appendSide(
@@ -510,6 +510,12 @@ private enum DiffAttributedText {
   private static func shouldHighlight(_ document: UnifiedDiffDocument) -> Bool {
     document.lines.count <= maximumHighlightedLines
       && codeLength(in: document) <= NativeCodeStyle.maximumHighlightedCharacters
+  }
+
+  private static func isRedundantFileHeader(_ line: UnifiedDiffDocument.Line?) -> Bool {
+    guard let line, line.kind == .metadata else { return false }
+    return line.text.hasPrefix("diff --git ") || line.text.hasPrefix("index ")
+      || line.text.hasPrefix("--- ") || line.text.hasPrefix("+++ ")
   }
 
   private static func marker(_ kind: UnifiedDiffDocument.Line.Kind) -> String {

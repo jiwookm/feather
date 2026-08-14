@@ -12,12 +12,15 @@ struct NativeDiffViewerRenderingTests {
       """
       diff --git a/Example.swift b/Example.swift
       index 1111111..2222222 100644
+      old mode 100755
+      new mode 100644
       --- a/Example.swift
       +++ b/Example.swift
       @@ -1,2 +1,2 @@
       -let answer = 41
       +let answer = 42
        print(answer)
+      \\ No newline at end of file
       """
     )
 
@@ -34,6 +37,19 @@ struct NativeDiffViewerRenderingTests {
         host.wantsLayer = true
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
+
+        let renderedStrings = descendants(of: NSTextView.self, in: host).map(\.string)
+        #expect(!renderedStrings.isEmpty)
+        for rendered in renderedStrings {
+          #expect(!rendered.contains("diff --git "))
+          #expect(!rendered.contains("index 1111111..2222222"))
+          #expect(!rendered.contains("--- a/Example.swift"))
+          #expect(!rendered.contains("+++ b/Example.swift"))
+          #expect(rendered.contains("old mode 100755"))
+          #expect(rendered.contains("new mode 100644"))
+          #expect(rendered.contains("No newline at end of file"))
+          #expect(rendered.contains("@@ -1,2 +1,2 @@"))
+        }
 
         let bitmap = try #require(
           host.bitmapImageRepForCachingDisplay(in: host.bounds)
