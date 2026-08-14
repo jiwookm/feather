@@ -159,7 +159,10 @@ final class TerminalRegistry {
   /// Inactive surfaces are discarded; tmux retains the process and canonical terminal state.
   /// This keeps Feather at one live Metal surface per visible terminal workspace.
   func release(_ terminalID: UUID) {
-    handles.removeValue(forKey: terminalID)
+    guard let handle = handles.removeValue(forKey: terminalID) else { return }
+    handle.session.actionHandler = nil
+    handle.session.closeHandler = nil
+    handle.session.requestHandler = nil
   }
 
   func updateAppearance(_ appearance: AppearancePreference) {

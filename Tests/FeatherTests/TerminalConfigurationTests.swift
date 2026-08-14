@@ -185,6 +185,7 @@ struct TerminalConfigurationTests {
       allowFailure: true
     ).text
     #expect(clients.contains(second.tmuxSessionID))
+    #expect(try await backend.sessionExists(first.tmuxSessionID))
     _ = secondHandle
   }
 }

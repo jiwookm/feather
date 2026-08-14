@@ -157,7 +157,8 @@ struct RemoteHandoffTests {
 
     #expect(command.hasPrefix("'/usr/bin/ssh' '-tt' '-o' 'BatchMode=yes'"))
     #expect(command.contains("'ForwardAgent=no' '-p' '2222' '--' 'build-host'"))
-    #expect(command.contains("new-session"))
+    #expect(command.contains("attach-session"))
+    #expect(!command.contains("new-session"))
     #expect(command.contains("feather-session"))
   }
 
@@ -180,6 +181,8 @@ struct RemoteHandoffTests {
     #expect(arguments.contains("/bin/sh"))
     #expect(command.contains("'new-session' '-d' '-s' 'feather-session'"))
     #expect(command.contains("codex"))
+    #expect(command.contains("@feather-attention"))
+    #expect(command.contains("printf"))
     #expect(command.contains("exec \"${SHELL:-/bin/sh}\" -l"))
   }
 
@@ -218,6 +221,7 @@ struct RemoteHandoffTests {
     let checkout = root.appendingPathComponent("local", isDirectory: true)
     let remoteRoot = root.appendingPathComponent("remote", isDirectory: true)
     let fakeSSH = root.appendingPathComponent("ssh")
+    let disconnectMarker = root.appendingPathComponent("ssh-offline")
     let socketName = "feather-remote-test-\(UUID().uuidString.lowercased())"
     let runner = CommandRunner()
     defer {
@@ -258,6 +262,7 @@ struct RemoteHandoffTests {
     let tmuxDirectory = tmux.deletingLastPathComponent().path
     let fakeSSHContents = """
       #!/bin/sh
+      if [ -e \(POSIXShell.quote(disconnectMarker.path)) ]; then exit 255; fi
       PATH=\(POSIXShell.quote(tmuxDirectory)):$PATH
       export PATH
       command=
@@ -313,7 +318,48 @@ struct RemoteHandoffTests {
     }
     #expect(fileManager.fileExists(atPath: agentFile))
     #expect(try await backend.sessionExists("feather-agent"))
-    try await backend.killServer()
+    var agentState: TerminalRuntimeState?
+    for _ in 0..<50 where agentState != .attention {
+      agentState = try await backend.runtimeSnapshots()
+        .first { $0.sessionID == "feather-agent" }?.state
+      if agentState != .attention {
+        try await Task.sleep(for: .milliseconds(20))
+      }
+    }
+    #expect(agentState == .attention)
+    try Data().write(to: disconnectMarker)
+    let disconnectedBackend = SSHTmuxBackend(
+      remote: preparation.remote,
+      sshExecutable: fakeSSH.path
+    )
+    await #expect(throws: BoundedCommandFailure.self) {
+      try await disconnectedBackend.sessionExists("feather-agent")
+    }
+    let survivingSession = try runner.run(
+      tmux.path,
+      arguments: ["-L", socketName, "has-session", "-t", "feather-agent"],
+      allowFailure: true
+    )
+    #expect(survivingSession.status == 0)
+
+    try fileManager.removeItem(at: disconnectMarker)
+    let reconnectedBackend = SSHTmuxBackend(
+      remote: preparation.remote,
+      sshExecutable: fakeSSH.path
+    )
+    #expect(try await reconnectedBackend.sessionExists("feather-agent"))
+    try await reconnectedBackend.acknowledgeAttention(sessionID: "feather-agent")
+    let acknowledgedState = try await reconnectedBackend.runtimeSnapshots()
+      .first { $0.sessionID == "feather-agent" }?.state
+    #expect(acknowledgedState == .shell)
+    try await reconnectedBackend.killSession("feather-agent")
+    #expect(
+      TmuxSessionRuntimeResolver.state(
+        for: "feather-agent",
+        in: try await reconnectedBackend.runtimeSnapshots()
+      ) == .exited
+    )
+    try await reconnectedBackend.killServer()
   }
 
   @Test
@@ -337,6 +383,12 @@ struct RemoteHandoffTests {
     }
     await #expect(throws: BoundedCommandFailure.self) {
       try await backend.killServer()
+    }
+    await #expect(throws: BoundedCommandFailure.self) {
+      try await backend.runtimeSnapshots()
+    }
+    await #expect(throws: BoundedCommandFailure.self) {
+      try await backend.acknowledgeAttention(sessionID: "feather-session")
     }
   }
 }

@@ -404,6 +404,41 @@ public struct TmuxSessionRuntimeSnapshot: Equatable, Sendable {
   ]
 }
 
+public enum TmuxSessionRuntimeResolver {
+  public static func statesBySession(
+    _ snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> [String: TerminalRuntimeState] {
+    Dictionary(grouping: snapshots, by: \.sessionID).mapValues(resolve)
+  }
+
+  public static func state(
+    for sessionID: String,
+    in snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> TerminalRuntimeState {
+    resolve(snapshots.filter { $0.sessionID == sessionID })
+  }
+
+  private static func resolve(
+    _ snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> TerminalRuntimeState {
+    if snapshots.contains(where: { $0.state == .attention }) { return .attention }
+    if snapshots.contains(where: { $0.state == .running }) { return .running }
+    if snapshots.contains(where: { $0.state == .shell }) { return .shell }
+    return .exited
+  }
+}
+
+public enum RemoteWorkspaceRuntimePolicy {
+  public static func stateAfterAttachmentExit(
+    sessionID: String,
+    snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> RemoteWorkspaceRuntimeState {
+    TmuxSessionRuntimeResolver.state(for: sessionID, in: snapshots) == .exited
+      ? .connected
+      : .offline
+  }
+}
+
 public enum TerminalSplitDirection: Equatable, Sendable {
   case right
   case down

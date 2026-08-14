@@ -451,6 +451,7 @@ final class AppModel: ObservableObject {
       selectedTerminalID = nil
     }
     acknowledgeAttentionIfNeeded(selectedTerminalID)
+    refreshSelectedRemoteTerminalStatesIfNeeded()
     persist()
   }
 
@@ -465,6 +466,7 @@ final class AppModel: ObservableObject {
   func selectTerminal(_ id: UUID) {
     selectedTerminalID = id
     acknowledgeAttentionIfNeeded(id)
+    refreshSelectedRemoteTerminalStatesIfNeeded()
     persist()
   }
 
@@ -480,11 +482,15 @@ final class AppModel: ObservableObject {
   }
 
   func terminalSurfaceDidAttach(_ terminal: TerminalRecord) {
-    if let workspace = remoteWorkspace(for: terminal),
-      remoteWorkspaceRuntimeStates[workspace.id] == .offline
-        || remoteWorkspaceRuntimeStates[workspace.id] == .ownershipMismatch
-    {
-      terminalRuntimeStates[terminal.id] = .offline
+    if let workspace = remoteWorkspace(for: terminal) {
+      guard remoteWorkspaceRuntimeStates[workspace.id] == .connected else {
+        terminalRuntimeStates[terminal.id] = .offline
+        return
+      }
+      if terminalRuntimeStates[terminal.id] == nil {
+        terminalRuntimeStates[terminal.id] =
+          AgentKind(terminal: terminal) == nil ? .shell : .running
+      }
       return
     }
     if terminalRuntimeStates[terminal.id] == nil || terminalRuntimeStates[terminal.id] == .exited {
@@ -995,8 +1001,7 @@ final class AppModel: ObservableObject {
     Task {
       defer { isBusy = false }
       do {
-        let state = try await remoteHandoffService.checkWorkspace(workspace)
-        applyRemoteWorkspaceState(state, to: workspace)
+        let state = try await reconcileRemoteWorkspace(workspace)
         switch state {
         case .connected:
           presentedAlert = .message("Remote Workspace Connected", workspace.profileName)
@@ -1253,17 +1258,23 @@ final class AppModel: ObservableObject {
     case .ssh(let remote):
       let backend = SSHTmuxBackend(remote: remote)
       Task {
-        guard
-          let command = try? await backend.foregroundCommand(terminal.tmuxSessionID),
-          terminals.contains(where: { $0.id == terminalID })
-        else { return }
-        terminalRuntimeStates[terminalID] =
-          TmuxSessionRuntimeSnapshot(
-            sessionID: terminal.tmuxSessionID,
-            command: command,
-            paneDead: false,
-            hasBell: false
-          ).state
+        do {
+          try await backend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+          guard terminals.contains(where: { $0.id == terminalID }) else { return }
+          if let command = try await backend.foregroundCommand(terminal.tmuxSessionID) {
+            terminalRuntimeStates[terminalID] =
+              TmuxSessionRuntimeSnapshot(
+                sessionID: terminal.tmuxSessionID,
+                command: command,
+                paneDead: false,
+                hasBell: false
+              ).state
+          } else {
+            terminalRuntimeStates[terminalID] = .exited
+          }
+        } catch {
+          markRemoteWorkspaceOfflineIfNeeded(error, for: terminal)
+        }
       }
     }
   }
@@ -1299,14 +1310,7 @@ final class AppModel: ObservableObject {
 
   private func refreshLocalTerminalStates() async {
     guard let tmuxBackend, let snapshots = try? await tmuxBackend.runtimeSnapshots() else { return }
-    let bySession = Dictionary(grouping: snapshots, by: \.sessionID).mapValues { snapshots in
-      if snapshots.contains(where: { $0.state == .attention }) {
-        return TerminalRuntimeState.attention
-      }
-      if snapshots.contains(where: { $0.state == .running }) { return TerminalRuntimeState.running }
-      if snapshots.contains(where: { $0.state == .shell }) { return TerminalRuntimeState.shell }
-      return TerminalRuntimeState.exited
-    }
+    let bySession = TmuxSessionRuntimeResolver.statesBySession(snapshots)
     for terminal in terminals {
       guard case .local = executionTarget(for: terminal) else { continue }
       var state = bySession[terminal.tmuxSessionID] ?? .exited
@@ -1332,8 +1336,79 @@ final class AppModel: ObservableObject {
     for workspace in remoteWorkspaces {
       remoteWorkspaceRuntimeStates[workspace.id] = .connecting
       do {
-        let state = try await remoteHandoffService.checkWorkspace(workspace)
-        applyRemoteWorkspaceState(state, to: workspace)
+        _ = try await reconcileRemoteWorkspace(workspace)
+      } catch {
+        applyRemoteWorkspaceState(.offline, to: workspace)
+      }
+    }
+  }
+
+  @discardableResult
+  private func reconcileRemoteWorkspace(
+    _ workspace: RemoteWorkspaceRecord,
+    afterAttachmentExit terminalID: UUID? = nil
+  ) async throws -> RemoteWorkspaceRuntimeState {
+    let state = try await remoteHandoffService.checkWorkspace(workspace)
+    guard state == .connected else {
+      applyRemoteWorkspaceState(state, to: workspace)
+      return state
+    }
+
+    let snapshots = try await refreshRemoteTerminalStates(in: workspace)
+    if let terminalID, let terminal = terminals.first(where: { $0.id == terminalID }) {
+      let postExitState = RemoteWorkspaceRuntimePolicy.stateAfterAttachmentExit(
+        sessionID: terminal.tmuxSessionID,
+        snapshots: snapshots
+      )
+      if postExitState == .offline {
+        applyRemoteWorkspaceState(postExitState, to: workspace)
+        return postExitState
+      }
+    }
+    applyRemoteWorkspaceState(.connected, to: workspace)
+    return .connected
+  }
+
+  private func refreshRemoteTerminalStates(
+    in workspace: RemoteWorkspaceRecord
+  ) async throws -> [TmuxSessionRuntimeSnapshot] {
+    let workspaceTerminals = terminals.filter {
+      workspace.matches(repositoryID: $0.repositoryID, worktreePath: $0.worktreePath)
+    }
+    guard !workspaceTerminals.isEmpty else { return [] }
+
+    let backend = SSHTmuxBackend(remote: workspace.remote)
+    let snapshots = try await backend.runtimeSnapshots()
+    let bySession = TmuxSessionRuntimeResolver.statesBySession(snapshots)
+    for terminal in workspaceTerminals {
+      guard terminals.contains(where: { $0.id == terminal.id }) else { continue }
+      var state = bySession[terminal.tmuxSessionID] ?? .exited
+      if state == .attention, selectedTerminalID == terminal.id, NSApp.isActive {
+        try await backend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+        if let command = try await backend.foregroundCommand(terminal.tmuxSessionID) {
+          state =
+            TmuxSessionRuntimeSnapshot(
+              sessionID: terminal.tmuxSessionID,
+              command: command,
+              paneDead: false,
+              hasBell: false
+            ).state
+        } else {
+          state = .exited
+        }
+      }
+      terminalRuntimeStates[terminal.id] = state
+    }
+    return snapshots
+  }
+
+  private func refreshSelectedRemoteTerminalStatesIfNeeded() {
+    guard let workspace = selectedRemoteWorkspace,
+      remoteWorkspaceRuntimeStates[workspace.id] == .connected
+    else { return }
+    Task {
+      do {
+        _ = try await refreshRemoteTerminalStates(in: workspace)
       } catch {
         applyRemoteWorkspaceState(.offline, to: workspace)
       }
@@ -1384,7 +1459,7 @@ final class AppModel: ObservableObject {
     terminalID: UUID,
     event: TerminalSurfaceRuntimeEvent
   ) {
-    guard terminals.contains(where: { $0.id == terminalID }) else { return }
+    guard let terminal = terminals.first(where: { $0.id == terminalID }) else { return }
     switch event {
     case .running:
       terminalRuntimeStates[terminalID] = .running
@@ -1399,7 +1474,22 @@ final class AppModel: ObservableObject {
       terminalRuntimeStates[terminalID] =
         selectedTerminalID == terminalID && NSApp.isActive ? .shell : .attention
     case .exited:
-      terminalRuntimeStates[terminalID] = .exited
+      guard let workspace = remoteWorkspace(for: terminal) else {
+        terminalRuntimeStates[terminalID] = .exited
+        return
+      }
+      guard remoteWorkspaceRuntimeStates[workspace.id] == .connected else { return }
+      remoteWorkspaceRuntimeStates[workspace.id] = .connecting
+      Task {
+        do {
+          _ = try await reconcileRemoteWorkspace(
+            workspace,
+            afterAttachmentExit: terminalID
+          )
+        } catch {
+          applyRemoteWorkspaceState(.offline, to: workspace)
+        }
+      }
     }
   }
 }

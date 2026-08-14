@@ -99,6 +99,32 @@ public actor SSHTmuxBackend: TerminalBackend {
     guard result.status == 0 || result.status == 1 else { throw failure(result) }
   }
 
+  public func runtimeSnapshots() async throws -> [TmuxSessionRuntimeSnapshot] {
+    let result = try await run(
+      [
+        "list-panes", "-a", "-f", "#{pane_active}", "-F",
+        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}",
+      ],
+      allowFailure: true
+    )
+    if result.status == 1 { return [] }
+    guard result.status == 0 else { throw failure(result) }
+    return TmuxSessionRuntimeParser.parse(result.stdoutText)
+  }
+
+  public func acknowledgeAttention(sessionID: String) async throws {
+    let unset = try await run(
+      ["set-option", "-w", "-u", "-t", sessionID, "@feather-attention"],
+      allowFailure: true
+    )
+    guard unset.status == 0 || unset.status == 1 else { throw failure(unset) }
+    let clearBell = try await run(
+      ["kill-session", "-C", "-t", sessionID],
+      allowFailure: true
+    )
+    guard clearBell.status == 0 || clearBell.status == 1 else { throw failure(clearBell) }
+  }
+
   private func run(
     _ arguments: [String],
     allowFailure: Bool = false
@@ -130,7 +156,12 @@ public actor SSHTmuxBackend: TerminalBackend {
     sessionID: String,
     remote: SSHRemoteTerminal
   ) -> [String] {
-    let shellCommand = "\(command); exec \"${SHELL:-/bin/sh}\" -l"
+    let markAttention = tmuxCommand(
+      remote: remote,
+      arguments: ["set-option", "-w", "-t", sessionID, "@feather-attention", "1"]
+    )
+    let shellCommand =
+      "\(command); \(markAttention); printf '\\a'; exec \"${SHELL:-/bin/sh}\" -l"
     return [
       "new-session", "-d", "-s", sessionID,
       "-c", remote.workingDirectory,
@@ -152,7 +183,7 @@ extension SSHRemoteTerminal {
   public func attachCommand(sessionID: String) -> String {
     let remoteCommand = [
       "tmux", "-L", tmuxSocketName, "-f", tmuxConfigPath,
-      "new-session", "-A", "-s", sessionID, "-c", workingDirectory,
+      "attach-session", "-t", sessionID,
     ]
     .map(POSIXShell.quote)
     .joined(separator: " ")

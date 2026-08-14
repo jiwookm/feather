@@ -161,5 +161,32 @@ struct TmuxBackendTests {
 
     #expect(snapshots.map(\.sessionID) == ["shell", "agent", "bell", "marked", "dead"])
     #expect(snapshots.map(\.state) == [.shell, .running, .attention, .attention, .exited])
+    #expect(TmuxSessionRuntimeResolver.state(for: "missing", in: snapshots) == .exited)
+    #expect(TmuxSessionRuntimeResolver.state(for: "shell", in: snapshots) == .shell)
+    #expect(TmuxSessionRuntimeResolver.state(for: "agent", in: snapshots) == .running)
+    #expect(TmuxSessionRuntimeResolver.state(for: "bell", in: snapshots) == .attention)
+    #expect(
+      RemoteWorkspaceRuntimePolicy.stateAfterAttachmentExit(
+        sessionID: "missing",
+        snapshots: snapshots
+      ) == .connected
+    )
+    #expect(
+      RemoteWorkspaceRuntimePolicy.stateAfterAttachmentExit(
+        sessionID: "agent",
+        snapshots: snapshots
+      ) == .offline
+    )
+
+    let multiPane =
+      snapshots + [
+        TmuxSessionRuntimeSnapshot(
+          sessionID: "shell",
+          command: "claude",
+          paneDead: false,
+          hasBell: false
+        )
+      ]
+    #expect(TmuxSessionRuntimeResolver.state(for: "shell", in: multiPane) == .running)
   }
 }
