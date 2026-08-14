@@ -85,6 +85,11 @@ public actor SSHTmuxBackend: TerminalBackend {
     _ = try await run(["kill-session", "-t", sessionID])
   }
 
+  public func killServer() async throws {
+    let result = try await run(["kill-server"], allowFailure: true)
+    guard result.status == 0 || result.status == 1 else { throw failure(result) }
+  }
+
   private func run(
     _ arguments: [String],
     allowFailure: Bool = false

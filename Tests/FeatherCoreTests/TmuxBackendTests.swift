@@ -147,6 +147,9 @@ struct TmuxBackendTests {
 
     try await backend.killSession(sessionID)
     #expect(!(try await backend.sessionExists(sessionID)))
+    #expect(try await backend.sessionExists("agent-session"))
+    try await backend.killServer()
+    #expect(!(try await backend.sessionExists("agent-session")))
   }
 
   @Test
