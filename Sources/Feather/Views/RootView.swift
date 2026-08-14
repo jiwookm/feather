@@ -269,19 +269,16 @@ struct RootView: View {
         },
         secondaryButton: .cancel()
       )
-    case .runWorkspaceRemotely(let repository, let worktree, let profile):
+    case .runWorkspaceRemotely(let repository, let worktree, let profile, let preflight):
       Alert(
         title: Text("Run \(worktree.displayName) on \(profile.name)?"),
-        message: Text(
-          "Feather will require a clean branch whose commit exactly matches origin, then create "
-            + "an owned remote checkout and private tmux workspace. Every new terminal for this "
-            + "worktree will run remotely."
-        ),
-        primaryButton: .default(Text("Run Remotely")) {
+        message: Text(remoteHandoffMessage(preflight)),
+        primaryButton: .default(Text("Transfer and Run")) {
           model.confirmRunWorkspaceRemotely(
             repository: repository,
             worktree: worktree,
-            profile: profile
+            profile: profile,
+            preflight: preflight
           )
         },
         secondaryButton: .cancel()
@@ -310,5 +307,21 @@ struct RootView: View {
       + "\(terminalLabel) for \(repository.displayName). Removing the project stops its terminal "
       + "sessions. You can keep every checkout or delete only clean worktrees created by "
       + "Feather. Git branches are always kept."
+  }
+
+  private func remoteHandoffMessage(_ preflight: RemoteHandoffPreflight) -> String {
+    let state = preflight.state
+    let byteCount = ByteCountFormatter.string(
+      fromByteCount: preflight.transferBytes,
+      countStyle: .file
+    )
+    return
+      "Feather will transfer \(state.unpublishedCommitCount) unpublished commit\(state.unpublishedCommitCount == 1 ? "" : "s"), "
+      + "\(state.stagedPathCount) staged path\(state.stagedPathCount == 1 ? "" : "s"), "
+      + "\(state.unstagedPathCount) unstaged path\(state.unstagedPathCount == 1 ? "" : "s"), "
+      + "and \(state.untrackedFileCount) non-ignored untracked file\(state.untrackedFileCount == 1 ? "" : "s") "
+      + "in a bounded \(byteCount) payload. Ignored files are not copied, and likely credential "
+      + "paths block handoff. The local checkout stays authoritative until the remote Git state, "
+      + "hashes, ownership, and tmux workspace are verified."
   }
 }

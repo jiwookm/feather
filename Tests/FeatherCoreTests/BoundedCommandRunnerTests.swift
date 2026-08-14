@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import FeatherCore
@@ -23,5 +24,20 @@ struct BoundedCommandRunnerTests {
         timeout: 5
       )
     }
+  }
+
+  @Test
+  func streamsBinaryStandardInputWithoutTextEncoding() async throws {
+    let input = Data((0..<1_024 * 1_024).map { UInt8($0 % 251) })
+    let output = try await BoundedCommandRunner().run(
+      "/bin/cat",
+      standardInput: input,
+      maximumOutputBytes: input.count + 1,
+      timeout: 5
+    )
+
+    #expect(output.status == 0)
+    #expect(output.stdout == input)
+    #expect(output.stderr.isEmpty)
   }
 }

@@ -56,6 +56,7 @@ public struct BoundedCommandRunner: Sendable {
     arguments: [String] = [],
     currentDirectory: URL? = nil,
     environment: [String: String] = [:],
+    standardInput: Data? = nil,
     maximumOutputBytes: Int = 8 * 1_024 * 1_024,
     timeout: TimeInterval = 15
   ) async throws -> BoundedCommandOutput {
@@ -64,6 +65,7 @@ public struct BoundedCommandRunner: Sendable {
       arguments: arguments,
       currentDirectory: currentDirectory,
       environment: environment,
+      standardInput: standardInput,
       maximumOutputBytes: maximumOutputBytes,
       timeout: timeout
     )
@@ -88,6 +90,7 @@ private final class CommandExecution: @unchecked Sendable {
   private let arguments: [String]
   private let currentDirectory: URL?
   private let environment: [String: String]
+  private let standardInput: Data?
   private let maximumOutputBytes: Int
   private let timeout: TimeInterval
   private let lock = NSLock()
@@ -101,6 +104,7 @@ private final class CommandExecution: @unchecked Sendable {
     arguments: [String],
     currentDirectory: URL?,
     environment: [String: String],
+    standardInput: Data?,
     maximumOutputBytes: Int,
     timeout: TimeInterval
   ) {
@@ -108,6 +112,7 @@ private final class CommandExecution: @unchecked Sendable {
     self.arguments = arguments
     self.currentDirectory = currentDirectory
     self.environment = environment
+    self.standardInput = standardInput
     self.maximumOutputBytes = max(1, maximumOutputBytes)
     self.timeout = max(0.1, timeout)
   }
@@ -116,11 +121,13 @@ private final class CommandExecution: @unchecked Sendable {
     let process = Process()
     let outputPipe = Pipe()
     let errorPipe = Pipe()
+    let inputPipe = standardInput.map { _ in Pipe() }
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.currentDirectoryURL = currentDirectory
     process.standardOutput = outputPipe
     process.standardError = errorPipe
+    process.standardInput = inputPipe ?? FileHandle.nullDevice
     process.environment = ProcessInfo.processInfo.environment.merging(environment) {
       _, replacement in replacement
     }
@@ -132,6 +139,17 @@ private final class CommandExecution: @unchecked Sendable {
     if cancelledBeforeStart { throw CancellationError() }
 
     try process.run()
+
+    let writers = DispatchGroup()
+    if let standardInput, let inputPipe {
+      try? inputPipe.fileHandleForReading.close()
+      writers.enter()
+      DispatchQueue.global(qos: .utility).async {
+        try? inputPipe.fileHandleForWriting.write(contentsOf: standardInput)
+        try? inputPipe.fileHandleForWriting.close()
+        writers.leave()
+      }
+    }
 
     let readers = DispatchGroup()
     readers.enter()
@@ -155,6 +173,7 @@ private final class CommandExecution: @unchecked Sendable {
 
     process.waitUntilExit()
     readers.wait()
+    writers.wait()
     timeoutWork.cancel()
 
     lock.lock()
