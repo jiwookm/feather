@@ -12,12 +12,15 @@ struct NativeDiffViewerRenderingTests {
       """
       diff --git a/Example.swift b/Example.swift
       index 1111111..2222222 100644
+      old mode 100755
+      new mode 100644
       --- a/Example.swift
       +++ b/Example.swift
       @@ -1,2 +1,2 @@
       -let answer = 41
       +let answer = 42
        print(answer)
+      \\ No newline at end of file
       """
     )
 
@@ -27,14 +30,26 @@ struct NativeDiffViewerRenderingTests {
           document: document,
           path: "Example.swift",
           isDark: isDark,
-          layout: layout,
-          wrapsLines: false
+          layout: layout
         )
         let host = NSHostingView(rootView: viewer)
         host.frame = NSRect(x: 0, y: 0, width: 720, height: 420)
         host.wantsLayer = true
         host.layoutSubtreeIfNeeded()
         host.displayIfNeeded()
+
+        let renderedStrings = descendants(of: NSTextView.self, in: host).map(\.string)
+        #expect(!renderedStrings.isEmpty)
+        for rendered in renderedStrings {
+          #expect(!rendered.contains("diff --git "))
+          #expect(!rendered.contains("index 1111111..2222222"))
+          #expect(!rendered.contains("--- a/Example.swift"))
+          #expect(!rendered.contains("+++ b/Example.swift"))
+          #expect(rendered.contains("old mode 100755"))
+          #expect(rendered.contains("new mode 100644"))
+          #expect(rendered.contains("No newline at end of file"))
+          #expect(rendered.contains("@@ -1,2 +1,2 @@"))
+        }
 
         let bitmap = try #require(
           host.bitmapImageRepForCachingDisplay(in: host.bounds)
@@ -70,6 +85,62 @@ struct NativeDiffViewerRenderingTests {
         }
       }
     }
+  }
+
+  @Test @MainActor
+  func narrowDiffsWrapInsideTheirPaneAndKeepSplitRowsAligned() throws {
+    let longValue = String(repeating: "abcdefghij", count: 28)
+    let document = UnifiedDiffDocument.parse(
+      """
+      diff --git a/Example.swift b/Example.swift
+      index 1111111..2222222 100644
+      --- a/Example.swift
+      +++ b/Example.swift
+      @@ -1 +1 @@
+      -let original = "\(longValue)"
+      +let replacement = "short"
+      """
+    )
+
+    for layout in NativeDiffLayout.allCases {
+      let host = NSHostingView(
+        rootView: NativeDiffViewer(
+          document: document,
+          path: "Example.swift",
+          isDark: false,
+          layout: layout
+        )
+      )
+      host.frame = NSRect(x: 0, y: 0, width: 340, height: 420)
+      host.layoutSubtreeIfNeeded()
+      host.displayIfNeeded()
+
+      let scrollViews = descendants(of: NSScrollView.self, in: host)
+      #expect(scrollViews.count == (layout == .split ? 2 : 1))
+      for scrollView in scrollViews {
+        #expect(!scrollView.hasHorizontalScroller)
+        let textView = try #require(scrollView.documentView as? NSTextView)
+        #expect(textView.textContainer?.widthTracksTextView == true)
+        #expect(textView.frame.width <= scrollView.contentSize.width + 1)
+      }
+
+      if layout == .split {
+        let heights = try scrollViews.map { scrollView in
+          let textView = try #require(scrollView.documentView as? NSTextView)
+          let layoutManager = try #require(textView.layoutManager)
+          let container = try #require(textView.textContainer)
+          layoutManager.ensureLayout(for: container)
+          return layoutManager.usedRect(for: container).height
+        }
+        #expect(abs(heights[0] - heights[1]) < 1)
+      }
+    }
+  }
+
+  @MainActor
+  private func descendants<T: NSView>(of type: T.Type, in view: NSView) -> [T] {
+    let direct = view.subviews.compactMap { $0 as? T }
+    return direct + view.subviews.flatMap { descendants(of: type, in: $0) }
   }
 
   private func pixelCount(

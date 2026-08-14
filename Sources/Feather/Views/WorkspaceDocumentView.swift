@@ -521,7 +521,7 @@ struct WorkspaceDocumentView: View {
   @Environment(\.colorScheme) private var colorScheme
   @Environment(\.openSettings) private var openSettings
   @ObservedObject var controller: WorkspaceDocumentController
-  @State private var wrapsLines = false
+  @State private var wrapsLines = true
   @State private var diffLayout = NativeDiffLayout.unified
   let isFullScreen: Bool
 
@@ -653,7 +653,8 @@ struct WorkspaceDocumentView: View {
   private var documentToolbar: some View {
     HStack(spacing: 8) {
       breadcrumbs
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+        .layoutPriority(-1)
       if controller.request?.diff != nil {
         modeButton(.file, enabled: controller.canEdit)
         modeButton(.diff, enabled: true)
@@ -677,17 +678,19 @@ struct WorkspaceDocumentView: View {
         )
       }
       Button {
-        wrapsLines.toggle()
+        if controller.mode != .diff { wrapsLines.toggle() }
       } label: {
         Image(systemName: "text.word.spacing")
           .font(.system(size: 11, weight: .medium))
       }
       .buttonStyle(HoverButtonStyle())
-      .foregroundStyle(wrapsLines ? palette.primaryText : palette.secondaryText)
-      .disabled(controller.mode == .diff && diffLayout == .split)
+      .foregroundStyle(
+        controller.mode == .diff || wrapsLines ? palette.primaryText : palette.secondaryText
+      )
+      .disabled(controller.mode == .diff)
       .help(
-        controller.mode == .diff && diffLayout == .split
-          ? "Split diffs keep rows aligned and do not wrap"
+        controller.mode == .diff
+          ? "Diffs always wrap to fit the available width"
           : (wrapsLines ? "Disable Word Wrap" : "Enable Word Wrap")
       )
       Button(action: controller.reload) {
@@ -793,8 +796,7 @@ struct WorkspaceDocumentView: View {
           document: document,
           path: controller.relativePath,
           isDark: colorScheme == .dark,
-          layout: diffLayout,
-          wrapsLines: wrapsLines
+          layout: diffLayout
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipped()
