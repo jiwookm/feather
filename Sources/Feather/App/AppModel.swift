@@ -101,6 +101,7 @@ final class AppModel: ObservableObject {
   let terminalRegistry: TerminalRegistry
   let worktreesRoot: URL
   let runtimeIdentity: FeatherRuntimeIdentity
+  private let processShutdown: FeatherProcessShutdown
   private var hasStarted = false
   private var terminalMonitorTask: Task<Void, Never>?
 
@@ -141,7 +142,20 @@ final class AppModel: ObservableObject {
       socketName: runtimeIdentity.localTmuxSocketName
     )
     tmuxSpec = preparedSpec
-    tmuxBackend = preparedSpec.map { TmuxBackend(spec: $0) }
+    let preparedBackend = preparedSpec.map { TmuxBackend(spec: $0) }
+    tmuxBackend = preparedBackend
+    let localServerTermination: FeatherProcessShutdown.LocalServerTermination?
+    if let preparedBackend {
+      localServerTermination = { try await preparedBackend.killServer() }
+    } else {
+      localServerTermination = nil
+    }
+    processShutdown = FeatherProcessShutdown(
+      terminateLocalServer: localServerTermination,
+      terminateRemoteServer: { remote in
+        try await SSHTmuxBackend(remote: remote).killServer()
+      }
+    )
     terminalRegistry = TerminalRegistry(
       applicationSupportURL: applicationSupportURL,
       launchSpec: preparedSpec
@@ -265,6 +279,21 @@ final class AppModel: ObservableObject {
       await refreshAll()
       await ensureTerminalMonitorSession()
       updateTerminalMonitor()
+    }
+  }
+
+  func terminateProcessesForQuit() async throws {
+    terminalMonitorTask?.cancel()
+    terminalMonitorTask = nil
+    do {
+      try await processShutdown.terminateAll(terminals: terminals)
+    } catch {
+      updateTerminalMonitor()
+      throw error
+    }
+    for terminal in terminals {
+      terminalRegistry.release(terminal.id)
+      terminalRuntimeStates[terminal.id] = .exited
     }
   }
 

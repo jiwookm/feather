@@ -226,6 +226,19 @@ public actor TmuxBackend: TerminalBackend {
     _ = try run(["kill-session", "-t", sessionID])
   }
 
+  public func killServer() async throws {
+    let arguments = ["kill-server"]
+    let result = try run(arguments, allowFailure: true)
+    guard result.status == 0 || result.status == 1 else {
+      throw CommandFailure(
+        executable: spec.executableURL.path,
+        arguments: ["-L", spec.socketName, "-f", spec.configURL.path] + arguments,
+        status: result.status,
+        output: result.text
+      )
+    }
+  }
+
   public func runtimeSnapshots() throws -> [TmuxSessionRuntimeSnapshot] {
     let result = try run(
       [

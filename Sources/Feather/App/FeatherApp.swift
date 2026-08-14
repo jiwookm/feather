@@ -12,6 +12,11 @@ struct FeatherApp: App {
       RootView()
         .environmentObject(model)
         .preferredColorScheme(preferredColorScheme)
+        .onAppear {
+          appDelegate.configureProcessShutdown {
+            try await model.terminateProcessesForQuit()
+          }
+        }
     }
     .windowStyle(.hiddenTitleBar)
     .defaultSize(width: 1280, height: 800)
@@ -102,8 +107,16 @@ struct FeatherApp: App {
   }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
   private var workspaceKeyMonitor: Any?
+  private let quitCoordinator = ApplicationQuitCoordinator()
+
+  func configureProcessShutdown(
+    _ shutdownHandler: @escaping ApplicationQuitCoordinator.ShutdownHandler
+  ) {
+    quitCoordinator.shutdownHandler = shutdownHandler
+  }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -135,7 +148,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    quitCoordinator.requestTermination { shouldTerminate in
+      sender.reply(toApplicationShouldTerminate: shouldTerminate)
+    }
+  }
+
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-    true
+    false
   }
 }

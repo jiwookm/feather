@@ -116,5 +116,8 @@ struct RemoteHandoffTests {
     await #expect(throws: BoundedCommandFailure.self) {
       try await backend.sessionExists("feather-session")
     }
+    await #expect(throws: BoundedCommandFailure.self) {
+      try await backend.killServer()
+    }
   }
 }
