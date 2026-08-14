@@ -42,4 +42,4 @@ Host feather-aws
     IdentitiesOnly yes
 ```
 
-In Feather Settings, use `feather-aws`, port `22`, and `/srv/feather`, then select **Test Connection**. Handoff refuses to push or copy local session stores. Codex documents stable resume-by-ID support, but the saved session must already be accessible on the remote host; otherwise use Feather's printed summary as the restart boundary. See the official [Codex developer commands](https://developers.openai.com/codex/cli/reference).
+In Feather Settings, create a named profile using `feather-aws`, port `22`, and `/srv/feather`, then select **Test Connection**. Close a worktree's terminals before choosing **Run Workspace Remotely…**. Feather refuses to push or copy local session stores, records ownership without storing credentials, and routes every later terminal for that worktree through the saved remote checkout. Codex resume-by-ID works only when the corresponding session data already exists on the remote host. See the official [Codex developer commands](https://developers.openai.com/codex/cli/reference).

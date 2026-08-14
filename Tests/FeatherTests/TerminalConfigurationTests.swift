@@ -42,6 +42,7 @@ struct TerminalConfigurationTests {
     #expect(!TerminalRuntimeState.running.showsNotificationBadge)
     #expect(TerminalRuntimeState.attention.showsNotificationBadge)
     #expect(TerminalRuntimeState.exited.showsNotificationBadge)
+    #expect(TerminalRuntimeState.offline.showsNotificationBadge)
   }
 
   @Test @MainActor

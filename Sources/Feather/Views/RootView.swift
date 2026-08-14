@@ -40,6 +40,7 @@ struct RootView: View {
         InspectorView(
           repository: model.selectedRepository,
           worktree: model.selectedWorktree,
+          remoteWorkspace: model.selectedRemoteWorkspace,
           isFullScreen: isFullScreen,
           selectedDocumentPath: document.request?.path,
           onOpenFile: { path in
@@ -61,6 +62,7 @@ struct RootView: View {
         )
         .id(model.selectedWorktreePath)
         .frame(width: 288)
+        .allowsHitTesting(!model.isBusy)
       }
     }
     .frame(minWidth: 820, minHeight: 520)
@@ -92,7 +94,10 @@ struct RootView: View {
         .transition(.opacity)
       }
     }
-    .task { model.start() }
+    .task {
+      model.updateWorkspaceDocumentState(hasOpenDocuments: document.hasDocument)
+      model.start()
+    }
     .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) {
       notification in
       if notification.object as? NSWindow === FeatherWindow.workspace {
@@ -127,12 +132,12 @@ struct RootView: View {
       model.toggleInspector()
     }
     .onReceive(NotificationCenter.default.publisher(for: .featherQuickOpenRequested)) { _ in
-      guard model.selectedWorktree != nil else { return }
+      guard model.selectedWorktree != nil, model.selectedRemoteWorkspace == nil else { return }
       repositorySearchVisible = false
       quickOpenVisible.toggle()
     }
     .onReceive(NotificationCenter.default.publisher(for: .featherRepositorySearchRequested)) { _ in
-      guard model.selectedWorktree != nil else { return }
+      guard model.selectedWorktree != nil, model.selectedRemoteWorkspace == nil else { return }
       quickOpenVisible = false
       repositorySearchVisible.toggle()
     }
@@ -142,6 +147,15 @@ struct RootView: View {
       }
       quickOpenVisible = false
       repositorySearchVisible = false
+    }
+    .onChange(of: document.hasDocument) { _, hasDocument in
+      model.updateWorkspaceDocumentState(hasOpenDocuments: hasDocument)
+    }
+    .onChange(of: model.isBusy) { _, isBusy in
+      if isBusy {
+        quickOpenVisible = false
+        repositorySearchVisible = false
+      }
     }
     .alert(item: $model.presentedAlert) { alert in
       switch alert {
@@ -198,15 +212,20 @@ struct RootView: View {
           },
           secondaryButton: .cancel()
         )
-      case .handoffTerminal(let terminal, let target):
+      case .runWorkspaceRemotely(let repository, let worktree, let profile):
         Alert(
-          title: Text("Handoff to \(target.host)?"),
+          title: Text("Run \(worktree.displayName) on \(profile.name)?"),
           message: Text(
-            "Feather will require a clean branch whose commit exactly matches origin, prepare a "
-              + "new remote checkout and tmux session, then end this local tmux session."
+            "Feather will require a clean branch whose commit exactly matches origin, then create "
+              + "an owned remote checkout and private tmux workspace. Every new terminal for this "
+              + "worktree will run remotely."
           ),
-          primaryButton: .destructive(Text("Handoff")) {
-            model.confirmRemoteHandoff(terminal, target: target)
+          primaryButton: .default(Text("Run Remotely")) {
+            model.confirmRunWorkspaceRemotely(
+              repository: repository,
+              worktree: worktree,
+              profile: profile
+            )
           },
           secondaryButton: .cancel()
         )

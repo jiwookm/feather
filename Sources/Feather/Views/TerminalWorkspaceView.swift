@@ -22,6 +22,8 @@ struct TerminalWorkspaceView: View {
         noWorktreeView
       } else if model.selectedManagedWorktreeState == .available {
         availableWorktreeView
+      } else if let remoteState = selectedRemoteBlockingState {
+        remoteBlockingView(remoteState)
       } else if let terminal = model.selectedTerminal {
         TerminalSurfaceContainer(terminal: terminal)
           .id(surfaceIdentity(terminal))
@@ -155,6 +157,40 @@ struct TerminalWorkspaceView: View {
     }
   }
 
+  private var selectedRemoteBlockingState: RemoteWorkspaceRuntimeState? {
+    guard let workspace = model.selectedRemoteWorkspace else { return nil }
+    let state = model.remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting
+    return state == .connected ? nil : state
+  }
+
+  private func remoteBlockingView(_ state: RemoteWorkspaceRuntimeState) -> some View {
+    let connecting = state == .connecting
+    let ownershipMismatch = state == .ownershipMismatch
+    return emptyState(
+      symbol: connecting
+        ? "network" : (ownershipMismatch ? "exclamationmark.shield" : "network.slash"),
+      title:
+        connecting
+        ? "Connecting to remote workspace"
+        : (ownershipMismatch ? "Ownership check failed" : "Remote workspace offline"),
+      message:
+        connecting
+        ? "Feather is verifying the saved checkout before attaching any terminal."
+        : (ownershipMismatch
+          ? "Feather kept the workspace record but will not operate on a checkout whose ownership marker changed."
+          : "The remote checkout and tmux sessions were left untouched. Reconnect when the host is reachable.")
+    ) {
+      if connecting {
+        ProgressView().controlSize(.small)
+      } else {
+        Button("Reconnect") { model.reconnectSelectedRemoteWorkspace() }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.small)
+          .disabled(model.isBusy)
+      }
+    }
+  }
+
   private var worktreeCreatingView: some View {
     emptyState(
       symbol: "arrow.triangle.2.circlepath",
@@ -167,15 +203,27 @@ struct TerminalWorkspaceView: View {
   }
 
   private var noTerminalView: some View {
-    emptyState(
-      symbol: "terminal",
-      title: "No terminals yet",
-      message: "Start an agent or open a persistent shell in this worktree."
+    let remoteWorkspace = model.selectedRemoteWorkspace
+    return emptyState(
+      symbol: remoteWorkspace == nil ? "terminal" : "network",
+      title: remoteWorkspace == nil ? "No terminals yet" : "Remote workspace ready",
+      message:
+        remoteWorkspace.map {
+          "New terminals run on \($0.profileName) and reattach through its private tmux server."
+        } ?? "Start an agent or open a persistent shell in this worktree."
     ) {
-      HStack(spacing: 8) {
-        terminalLaunchButton(.claude)
-        terminalLaunchButton(.codex)
-        terminalLaunchButton(.terminal)
+      VStack(spacing: 8) {
+        HStack(spacing: 8) {
+          terminalLaunchButton(.claude)
+          terminalLaunchButton(.codex)
+          terminalLaunchButton(.terminal)
+        }
+        if remoteWorkspace == nil, model.selectedRemoteProfile != nil {
+          Button("Run Remotely…") { model.requestRunSelectedWorkspaceRemotely() }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(!model.canRunSelectedWorkspaceRemotely)
+        }
       }
     }
   }
@@ -273,16 +321,19 @@ struct TerminalWorkspaceView: View {
   }
 
   private func surfaceIdentity(_ terminal: TerminalRecord) -> String {
-    switch terminal.executionTarget {
+    let state = model.remoteWorkspace(for: terminal).flatMap {
+      model.remoteWorkspaceRuntimeStates[$0.id]
+    }
+    return switch model.executionTarget(for: terminal) {
     case .local:
       "\(terminal.id.uuidString)-local"
     case .ssh(let remote):
-      "\(terminal.id.uuidString)-ssh-\(remote.target.host)-\(remote.workingDirectory)"
+      "\(terminal.id.uuidString)-ssh-\(remote.target.host)-\(remote.workingDirectory)-\(state?.rawValue ?? "unknown")"
     }
   }
 
   private func terminalHelp(_ terminal: TerminalRecord) -> String {
-    switch terminal.executionTarget {
+    switch model.executionTarget(for: terminal) {
     case .local:
       terminal.worktreePath
     case .ssh(let remote):
@@ -309,7 +360,11 @@ private struct TerminalSurfaceContainer: View {
       }
     }
     .task {
-      handle = model.terminalRegistry.handle(for: terminal, appearance: model.appearance)
+      handle = model.terminalRegistry.handle(
+        for: terminal,
+        executionTarget: model.executionTarget(for: terminal),
+        appearance: model.appearance
+      )
       if handle != nil {
         model.terminalSurfaceDidAttach(terminal)
       }

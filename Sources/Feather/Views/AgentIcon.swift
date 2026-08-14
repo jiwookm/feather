@@ -87,7 +87,7 @@ struct AgentSessionPresentation: Identifiable {
 extension TerminalRuntimeState {
   var showsNotificationBadge: Bool {
     switch self {
-    case .attention, .exited: true
+    case .attention, .exited, .offline: true
     case .shell, .running: false
     }
   }
@@ -116,6 +116,7 @@ struct TerminalRuntimeBadge: View {
     switch state {
     case .attention: Color(hex: 0xF0A33A)
     case .exited: Color(hex: 0xD45555)
+    case .offline: Color(hex: 0x8A8A8A)
     case .shell, .running: .clear
     }
   }
@@ -126,6 +127,7 @@ struct TerminalRuntimeBadge: View {
     case .running: "Running"
     case .attention: "Attention requested"
     case .exited: "Exited"
+    case .offline: "Remote workspace offline"
     }
   }
 }

@@ -3,15 +3,20 @@ import SwiftUI
 
 struct SettingsView: View {
   @ObservedObject var model: AppModel
+  @State private var draftProfileID: UUID?
+  @State private var remoteName: String
   @State private var remoteHost: String
   @State private var remotePort: Int
   @State private var remoteRoot: String
 
   init(model: AppModel) {
     self.model = model
-    _remoteHost = State(initialValue: model.remoteTarget.host)
-    _remotePort = State(initialValue: model.remoteTarget.port)
-    _remoteRoot = State(initialValue: model.remoteTarget.rootPath)
+    let profile = model.selectedRemoteProfile
+    _draftProfileID = State(initialValue: profile?.id)
+    _remoteName = State(initialValue: profile?.name ?? "")
+    _remoteHost = State(initialValue: profile?.target.host ?? "")
+    _remotePort = State(initialValue: profile?.target.port ?? 22)
+    _remoteRoot = State(initialValue: profile?.target.rootPath ?? "")
   }
 
   var body: some View {
@@ -52,7 +57,19 @@ struct SettingsView: View {
         LabeledContent("New checkouts", value: model.worktreesRoot.path)
       }
 
-      Section("Remote Handoff") {
+      Section("SSH Profiles") {
+        Picker("Profile", selection: $draftProfileID) {
+          Text("New Profile").tag(nil as UUID?)
+          ForEach(model.remoteProfiles) { profile in
+            Text(profile.name).tag(profile.id as UUID?)
+          }
+        }
+        .onChange(of: draftProfileID) { _, id in
+          model.selectRemoteProfile(id)
+          loadProfile(id)
+        }
+
+        TextField("Profile name", text: $remoteName)
         TextField("SSH host or alias", text: $remoteHost)
         HStack {
           TextField("Port", value: $remotePort, format: .number)
@@ -60,16 +77,39 @@ struct SettingsView: View {
           TextField("Absolute remote root", text: $remoteRoot)
         }
         HStack {
-          Button("Save") { model.saveRemoteTarget(draftRemoteTarget) }
-            .disabled(!hasRemoteDraft || model.isBusy)
+          Button(draftProfileID == nil ? "Add Profile" : "Save Changes") {
+            model.saveRemoteProfile(
+              id: draftProfileID,
+              name: remoteName,
+              target: draftRemoteTarget
+            )
+            draftProfileID = model.selectedRemoteProfileID
+          }
+          .disabled(!hasRemoteDraft || model.isBusy)
+
           Button("Test Connection") { model.testRemoteTarget(draftRemoteTarget) }
             .disabled(!hasRemoteDraft || model.isBusy)
+
+          Button("New") { beginNewProfile() }
+            .disabled(draftProfileID == nil)
+
+          if let draftProfileID {
+            Button("Delete", role: .destructive) {
+              model.deleteRemoteProfile(draftProfileID)
+              if !model.remoteProfiles.contains(where: { $0.id == draftProfileID }) {
+                beginNewProfile()
+              }
+            }
+            .disabled(model.remoteProfileIsInUse(draftProfileID) || model.isBusy)
+          }
+
           if model.isBusy { ProgressView().controlSize(.small) }
         }
         Text(
           "Use an OpenSSH alias when possible. The host must already have Git, tmux, repository "
-            + "credentials, and your agent CLI authentication. Feather does not store passwords "
-            + "or enable SSH agent forwarding."
+            + "credentials, and your agent CLI authentication. Feather stores only the profile "
+            + "name, host, port, and remote root—never passwords, private keys, cloud tokens, or "
+            + "agent credentials."
         )
         .font(.feather(size: 11))
         .foregroundStyle(.secondary)
@@ -78,15 +118,36 @@ struct SettingsView: View {
     .font(.feather(size: 13))
     .formStyle(.grouped)
     .padding(8)
-    .frame(width: 560, height: 600)
+    .frame(width: 600, height: 680)
   }
 
   private var hasRemoteDraft: Bool {
-    !remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    !remoteName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && !remoteRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   private var draftRemoteTarget: SSHRemoteTarget {
     SSHRemoteTarget(host: remoteHost, port: remotePort, rootPath: remoteRoot)
+  }
+
+  private func loadProfile(_ id: UUID?) {
+    guard let profile = model.remoteProfiles.first(where: { $0.id == id }) else {
+      remoteName = ""
+      remoteHost = ""
+      remotePort = 22
+      remoteRoot = ""
+      return
+    }
+    remoteName = profile.name
+    remoteHost = profile.target.host
+    remotePort = profile.target.port
+    remoteRoot = profile.target.rootPath
+  }
+
+  private func beginNewProfile() {
+    draftProfileID = nil
+    model.selectRemoteProfile(nil)
+    loadProfile(nil)
   }
 }

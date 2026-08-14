@@ -103,7 +103,86 @@ struct PersistenceTests {
 
     try store.save(snapshot)
 
-    #expect(try store.load() == snapshot)
+    let loaded = try store.load()
+    #expect(loaded == snapshot)
+    #expect(loaded.terminals.first?.executionTarget == .local)
+    #expect(loaded.remoteProfiles.map(\.name) == ["build-host"])
+    #expect(loaded.remoteWorkspaces.count == 1)
+    #expect(
+      WorkspaceExecutionRouter.target(
+        for: try #require(loaded.terminals.first),
+        in: loaded.remoteWorkspaces
+      ) == terminal.executionTarget
+    )
+  }
+
+  @Test
+  func migratesPerTerminalSSHMetadataToOneWorkspaceAuthority() throws {
+    let repositoryID = UUID()
+    let remote = SSHRemoteTerminal(
+      target: SSHRemoteTarget(host: "build-host", rootPath: "/srv/feather"),
+      workingDirectory: "/srv/feather/worktrees/project",
+      tmuxConfigPath: "/srv/feather/.feather/tmux.conf"
+    )
+    let remoteTerminal = TerminalRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      title: "Claude",
+      order: 0,
+      executionTarget: .ssh(remote)
+    )
+    let sibling = TerminalRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      title: "Codex",
+      order: 1
+    )
+
+    let snapshot = ApplicationSnapshot(terminals: [remoteTerminal, sibling])
+
+    #expect(snapshot.remoteWorkspaces.count == 1)
+    #expect(snapshot.terminals.allSatisfy { $0.executionTarget == .local })
+    for terminal in snapshot.terminals {
+      #expect(
+        WorkspaceExecutionRouter.target(for: terminal, in: snapshot.remoteWorkspaces)
+          == .ssh(remote))
+    }
+  }
+
+  @Test
+  func persistsOwnedRemoteWorkspaceMetadata() throws {
+    let profile = SSHRemoteProfile(
+      name: "Build Mac",
+      target: SSHRemoteTarget(host: "build-host", rootPath: "/srv/feather")
+    )
+    let repositoryID = UUID()
+    let workspace = RemoteWorkspaceRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      profileID: profile.id,
+      profileName: profile.name,
+      remote: SSHRemoteTerminal(
+        target: profile.target,
+        workingDirectory: "/srv/feather/worktrees/project",
+        tmuxConfigPath: "/srv/feather/.feather/tmux.conf"
+      ),
+      ownership: RemoteWorkspaceOwnership(
+        token: "owned-token",
+        markerPath: "/srv/feather/.feather/workspaces/project.owner"
+      )
+    )
+    let snapshot = ApplicationSnapshot(
+      remoteProfiles: [profile],
+      selectedRemoteProfileID: profile.id,
+      remoteWorkspaces: [workspace, workspace]
+    )
+
+    let data = try JSONEncoder().encode(snapshot)
+    let loaded = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
+
+    #expect(loaded.remoteProfiles == [profile])
+    #expect(loaded.selectedRemoteProfileID == profile.id)
+    #expect(loaded.remoteWorkspaces == [workspace])
   }
 
   @Test
@@ -131,6 +210,8 @@ struct PersistenceTests {
     #expect(snapshot.managedWorktrees.first?.state == .active)
     #expect(snapshot.inspectorVisible == false)
     #expect(snapshot.remoteTarget == SSHRemoteTarget())
+    #expect(snapshot.remoteProfiles.isEmpty)
+    #expect(snapshot.remoteWorkspaces.isEmpty)
   }
 
   @Test

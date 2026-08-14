@@ -250,6 +250,26 @@ public struct SSHRemoteTarget: Codable, Equatable, Sendable {
   }
 }
 
+public struct SSHRemoteProfile: Codable, Equatable, Identifiable, Sendable {
+  public let id: UUID
+  public var name: String
+  public var target: SSHRemoteTarget
+
+  public init(
+    id: UUID = UUID(),
+    name: String,
+    target: SSHRemoteTarget
+  ) {
+    self.id = id
+    self.name = name
+    self.target = target
+  }
+
+  public var isConfigured: Bool {
+    !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && target.isConfigured
+  }
+}
+
 public struct SSHRemoteTerminal: Codable, Equatable, Sendable {
   public let target: SSHRemoteTarget
   public let workingDirectory: String
@@ -274,11 +294,89 @@ public enum TerminalExecutionTarget: Codable, Equatable, Sendable {
   case ssh(SSHRemoteTerminal)
 }
 
+public struct RemoteWorkspaceOwnership: Codable, Equatable, Sendable {
+  public let token: String
+  public let markerPath: String
+
+  public init(token: String, markerPath: String) {
+    self.token = token
+    self.markerPath = markerPath
+  }
+}
+
+public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable {
+  public let id: UUID
+  public let repositoryID: UUID
+  public let worktreePath: String
+  public let profileID: UUID?
+  public let profileName: String
+  public let remote: SSHRemoteTerminal
+  public let ownership: RemoteWorkspaceOwnership?
+
+  public init(
+    id: UUID = UUID(),
+    repositoryID: UUID,
+    worktreePath: String,
+    profileID: UUID?,
+    profileName: String,
+    remote: SSHRemoteTerminal,
+    ownership: RemoteWorkspaceOwnership?
+  ) {
+    self.id = id
+    self.repositoryID = repositoryID
+    self.worktreePath = worktreePath
+    self.profileID = profileID
+    self.profileName = profileName
+    self.remote = remote
+    self.ownership = ownership
+  }
+
+  public func matches(repositoryID: UUID, worktreePath: String) -> Bool {
+    self.repositoryID == repositoryID && self.worktreePath == worktreePath
+  }
+}
+
+public enum WorkspaceExecutionRouter {
+  public static func remoteWorkspace(
+    for terminal: TerminalRecord,
+    in workspaces: [RemoteWorkspaceRecord]
+  ) -> RemoteWorkspaceRecord? {
+    remoteWorkspace(
+      repositoryID: terminal.repositoryID,
+      worktreePath: terminal.worktreePath,
+      in: workspaces
+    )
+  }
+
+  public static func remoteWorkspace(
+    repositoryID: UUID,
+    worktreePath: String,
+    in workspaces: [RemoteWorkspaceRecord]
+  ) -> RemoteWorkspaceRecord? {
+    workspaces.first { $0.matches(repositoryID: repositoryID, worktreePath: worktreePath) }
+  }
+
+  public static func target(
+    for terminal: TerminalRecord,
+    in workspaces: [RemoteWorkspaceRecord]
+  ) -> TerminalExecutionTarget {
+    remoteWorkspace(for: terminal, in: workspaces).map { .ssh($0.remote) } ?? .local
+  }
+}
+
+public enum RemoteWorkspaceRuntimeState: String, Equatable, Sendable {
+  case connecting
+  case connected
+  case offline
+  case ownershipMismatch
+}
+
 public enum TerminalRuntimeState: String, Equatable, Sendable {
   case shell
   case running
   case attention
   case exited
+  case offline
 }
 
 public struct TmuxSessionRuntimeSnapshot: Equatable, Sendable {
@@ -327,6 +425,11 @@ public struct TerminalPaneState: Equatable, Sendable {
 public protocol TerminalBackend: Actor {
   func sessionExists(_ sessionID: String) async throws -> Bool
   func ensureSession(_ sessionID: String, workingDirectory: String) async throws
+  func launchCommand(
+    _ command: String,
+    sessionID: String,
+    workingDirectory: String
+  ) async throws
   func foregroundCommand(_ sessionID: String) async throws -> String?
   func activePane(_ sessionID: String) async throws -> TerminalPaneState?
   func splitPane(
@@ -339,7 +442,7 @@ public protocol TerminalBackend: Actor {
 }
 
 public struct ApplicationSnapshot: Codable, Equatable, Sendable {
-  public static let currentVersion = 5
+  public static let currentVersion = 6
 
   public var version: Int
   public var repositories: [RepositoryRecord]
@@ -352,6 +455,9 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
   public var sidebarVisible: Bool
   public var inspectorVisible: Bool
   public var remoteTarget: SSHRemoteTarget
+  public var remoteProfiles: [SSHRemoteProfile]
+  public var selectedRemoteProfileID: UUID?
+  public var remoteWorkspaces: [RemoteWorkspaceRecord]
 
   public init(
     version: Int = ApplicationSnapshot.currentVersion,
@@ -364,19 +470,46 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     selectedTerminalID: UUID? = nil,
     sidebarVisible: Bool = true,
     inspectorVisible: Bool = false,
-    remoteTarget: SSHRemoteTarget = SSHRemoteTarget()
+    remoteTarget: SSHRemoteTarget = SSHRemoteTarget(),
+    remoteProfiles: [SSHRemoteProfile] = [],
+    selectedRemoteProfileID: UUID? = nil,
+    remoteWorkspaces: [RemoteWorkspaceRecord] = []
   ) {
+    var profiles = remoteProfiles
+    if profiles.isEmpty, remoteTarget.isConfigured {
+      profiles.append(SSHRemoteProfile(name: remoteTarget.host, target: remoteTarget))
+    }
+    for terminal in terminals {
+      guard case .ssh(let remote) = terminal.executionTarget,
+        !profiles.contains(where: { $0.target == remote.target })
+      else { continue }
+      profiles.append(SSHRemoteProfile(name: remote.target.host, target: remote.target))
+    }
+    let profileID =
+      selectedRemoteProfileID.flatMap { selectedID in
+        profiles.contains(where: { $0.id == selectedID }) ? selectedID : nil
+      } ?? profiles.first?.id
+    let normalized = Self.normalizeRemoteWorkspaces(
+      terminals: terminals,
+      remoteWorkspaces: remoteWorkspaces,
+      profiles: profiles
+    )
+
     self.version = version
     self.repositories = repositories
     self.managedWorktrees = managedWorktrees
-    self.terminals = terminals
+    self.terminals = normalized.terminals
     self.appearance = appearance
     self.selectedRepositoryID = selectedRepositoryID
     self.selectedWorktreePath = selectedWorktreePath
     self.selectedTerminalID = selectedTerminalID
     self.sidebarVisible = sidebarVisible
     self.inspectorVisible = inspectorVisible
-    self.remoteTarget = remoteTarget
+    self.remoteTarget =
+      profiles.first(where: { $0.id == profileID })?.target ?? remoteTarget
+    self.remoteProfiles = profiles
+    self.selectedRemoteProfileID = profileID
+    self.remoteWorkspaces = normalized.remoteWorkspaces
   }
 
   private enum CodingKeys: String, CodingKey {
@@ -391,28 +524,107 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     case sidebarVisible
     case inspectorVisible
     case remoteTarget
+    case remoteProfiles
+    case selectedRemoteProfileID
+    case remoteWorkspaces
   }
 
   public init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
-    repositories =
-      try container.decodeIfPresent([RepositoryRecord].self, forKey: .repositories) ?? []
-    managedWorktrees =
-      try container.decodeIfPresent([ManagedWorktreeRecord].self, forKey: .managedWorktrees) ?? []
-    terminals = try container.decodeIfPresent([TerminalRecord].self, forKey: .terminals) ?? []
-    appearance =
-      try container.decodeIfPresent(AppearancePreference.self, forKey: .appearance) ?? .system
-    selectedRepositoryID = try container.decodeIfPresent(UUID.self, forKey: .selectedRepositoryID)
-    selectedWorktreePath = try container.decodeIfPresent(String.self, forKey: .selectedWorktreePath)
-    selectedTerminalID = try container.decodeIfPresent(UUID.self, forKey: .selectedTerminalID)
-    sidebarVisible = try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true
-    inspectorVisible = try container.decodeIfPresent(Bool.self, forKey: .inspectorVisible) ?? false
-    remoteTarget =
+    let remoteTarget =
       try container.decodeIfPresent(SSHRemoteTarget.self, forKey: .remoteTarget)
       ?? SSHRemoteTarget()
+    self.init(
+      version: try container.decodeIfPresent(Int.self, forKey: .version) ?? 1,
+      repositories: try container.decodeIfPresent(
+        [RepositoryRecord].self,
+        forKey: .repositories
+      ) ?? [],
+      managedWorktrees: try container.decodeIfPresent(
+        [ManagedWorktreeRecord].self,
+        forKey: .managedWorktrees
+      ) ?? [],
+      terminals: try container.decodeIfPresent([TerminalRecord].self, forKey: .terminals) ?? [],
+      appearance: try container.decodeIfPresent(
+        AppearancePreference.self,
+        forKey: .appearance
+      ) ?? .system,
+      selectedRepositoryID: try container.decodeIfPresent(
+        UUID.self,
+        forKey: .selectedRepositoryID
+      ),
+      selectedWorktreePath: try container.decodeIfPresent(
+        String.self,
+        forKey: .selectedWorktreePath
+      ),
+      selectedTerminalID: try container.decodeIfPresent(UUID.self, forKey: .selectedTerminalID),
+      sidebarVisible: try container.decodeIfPresent(Bool.self, forKey: .sidebarVisible) ?? true,
+      inspectorVisible: try container.decodeIfPresent(Bool.self, forKey: .inspectorVisible)
+        ?? false,
+      remoteTarget: remoteTarget,
+      remoteProfiles: try container.decodeIfPresent(
+        [SSHRemoteProfile].self,
+        forKey: .remoteProfiles
+      ) ?? [],
+      selectedRemoteProfileID: try container.decodeIfPresent(
+        UUID.self,
+        forKey: .selectedRemoteProfileID
+      ),
+      remoteWorkspaces: try container.decodeIfPresent(
+        [RemoteWorkspaceRecord].self,
+        forKey: .remoteWorkspaces
+      ) ?? []
+    )
   }
 
+  private static func normalizeRemoteWorkspaces(
+    terminals: [TerminalRecord],
+    remoteWorkspaces: [RemoteWorkspaceRecord],
+    profiles: [SSHRemoteProfile]
+  ) -> (terminals: [TerminalRecord], remoteWorkspaces: [RemoteWorkspaceRecord]) {
+    struct WorkspaceKey: Hashable {
+      let repositoryID: UUID
+      let worktreePath: String
+    }
+
+    var seen: Set<WorkspaceKey> = []
+    var normalizedWorkspaces: [RemoteWorkspaceRecord] = []
+    for workspace in remoteWorkspaces {
+      let key = WorkspaceKey(
+        repositoryID: workspace.repositoryID,
+        worktreePath: workspace.worktreePath
+      )
+      guard seen.insert(key).inserted else { continue }
+      normalizedWorkspaces.append(workspace)
+    }
+
+    var normalizedTerminals = terminals
+    for index in normalizedTerminals.indices {
+      let terminal = normalizedTerminals[index]
+      guard case .ssh(let remote) = terminal.executionTarget else { continue }
+      let key = WorkspaceKey(
+        repositoryID: terminal.repositoryID,
+        worktreePath: terminal.worktreePath
+      )
+      if seen.insert(key).inserted {
+        let profile = profiles.first { $0.target == remote.target }
+        normalizedWorkspaces.append(
+          RemoteWorkspaceRecord(
+            id: terminal.id,
+            repositoryID: terminal.repositoryID,
+            worktreePath: terminal.worktreePath,
+            profileID: profile?.id,
+            profileName: profile?.name ?? remote.target.host,
+            remote: remote,
+            ownership: nil
+          )
+        )
+      }
+      normalizedTerminals[index].executionTarget = .local
+    }
+
+    return (normalizedTerminals, normalizedWorkspaces)
+  }
 }
 
 public enum FeatherError: LocalizedError, Equatable, Sendable {
@@ -424,6 +636,7 @@ public enum FeatherError: LocalizedError, Equatable, Sendable {
   case worktreeNotMerged(String)
   case tmuxUnavailable
   case malformedGitOutput
+  case remoteWorkspaceActive(String)
 
   public var errorDescription: String? {
     switch self {
@@ -443,6 +656,8 @@ public enum FeatherError: LocalizedError, Equatable, Sendable {
       "tmux is required. Install it with `brew install tmux`, then relaunch Feather."
     case .malformedGitOutput:
       "Git returned malformed worktree data."
+    case .remoteWorkspaceActive(let path):
+      "Return the remote workspace before changing or removing its local checkout: \(path)"
     }
   }
 }

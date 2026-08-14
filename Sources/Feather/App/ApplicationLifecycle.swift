@@ -13,23 +13,35 @@ struct FeatherProcessShutdown {
     let socketName: String
   }
 
+  private struct WorkspaceKey: Hashable {
+    let repositoryID: UUID
+    let worktreePath: String
+  }
+
   let terminateLocalServer: LocalServerTermination?
   let terminateRemoteServer: RemoteServerTermination
 
-  func terminateAll(terminals: [TerminalRecord]) async throws {
+  func terminateAll(
+    terminals: [TerminalRecord],
+    remoteWorkspaces: [RemoteWorkspaceRecord] = []
+  ) async throws {
     var seenRemoteServers: Set<RemoteServerKey> = []
     var remoteServers: [SSHRemoteTerminal] = []
+    let remoteWorkspaceKeys = Set(
+      remoteWorkspaces.map {
+        WorkspaceKey(repositoryID: $0.repositoryID, worktreePath: $0.worktreePath)
+      }
+    )
+    for workspace in remoteWorkspaces {
+      appendRemoteServer(
+        workspace.remote,
+        seen: &seenRemoteServers,
+        servers: &remoteServers
+      )
+    }
     for terminal in terminals {
       guard case .ssh(let remote) = terminal.executionTarget else { continue }
-      let key = RemoteServerKey(
-        host: remote.target.host,
-        port: remote.target.port,
-        configPath: remote.tmuxConfigPath,
-        socketName: remote.tmuxSocketName
-      )
-      if seenRemoteServers.insert(key).inserted {
-        remoteServers.append(remote)
-      }
+      appendRemoteServer(remote, seen: &seenRemoteServers, servers: &remoteServers)
     }
 
     var remoteFailures: [String] = []
@@ -46,9 +58,28 @@ struct FeatherProcessShutdown {
 
     if let terminateLocalServer {
       try await terminateLocalServer()
-    } else if terminals.contains(where: { $0.executionTarget == .local }) {
+    } else if terminals.contains(where: { terminal in
+      guard terminal.executionTarget == .local else { return false }
+      return !remoteWorkspaceKeys.contains(
+        WorkspaceKey(repositoryID: terminal.repositoryID, worktreePath: terminal.worktreePath)
+      )
+    }) {
       throw FeatherError.tmuxUnavailable
     }
+  }
+
+  private func appendRemoteServer(
+    _ remote: SSHRemoteTerminal,
+    seen: inout Set<RemoteServerKey>,
+    servers: inout [SSHRemoteTerminal]
+  ) {
+    let key = RemoteServerKey(
+      host: remote.target.host,
+      port: remote.target.port,
+      configPath: remote.tmuxConfigPath,
+      socketName: remote.tmuxSocketName
+    )
+    if seen.insert(key).inserted { servers.append(remote) }
   }
 }
 

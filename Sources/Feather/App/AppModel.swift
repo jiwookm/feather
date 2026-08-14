@@ -48,7 +48,7 @@ final class AppModel: ObservableObject {
     case closePane(TerminalRecord, TerminalPaneState)
     case removeWorktree(RepositoryRecord, GitWorktree)
     case returnWorktree(RepositoryRecord, GitWorktree)
-    case handoffTerminal(TerminalRecord, SSHRemoteTarget)
+    case runWorkspaceRemotely(RepositoryRecord, GitWorktree, SSHRemoteProfile)
     case message(String, String)
 
     var id: String {
@@ -58,7 +58,8 @@ final class AppModel: ObservableObject {
       case .closePane(_, let pane): "pane-\(pane.id)"
       case .removeWorktree(_, let worktree): "worktree-\(worktree.path)"
       case .returnWorktree(_, let worktree): "return-\(worktree.path)"
-      case .handoffTerminal(let terminal, _): "handoff-\(terminal.id)"
+      case .runWorkspaceRemotely(let repository, let worktree, _):
+        "remote-workspace-\(repository.id)-\(worktree.path)"
       case .message(let title, let message): "message-\(title)-\(message)"
       }
     }
@@ -77,6 +78,7 @@ final class AppModel: ObservableObject {
   @Published var sidebarVisible: Bool
   @Published var inspectorVisible: Bool
   @Published var isBusy = false
+  @Published private(set) var hasOpenWorkspaceDocuments = false
   @Published var presentedAlert: PresentedAlert?
   @Published var projectRemovalCandidate: RepositoryRecord?
   @Published var appearance: AppearancePreference {
@@ -86,12 +88,11 @@ final class AppModel: ObservableObject {
       persist()
     }
   }
-  @Published private(set) var remoteTarget: SSHRemoteTarget {
-    didSet {
-      guard oldValue != remoteTarget else { return }
-      persist()
-    }
-  }
+  @Published private(set) var remoteProfiles: [SSHRemoteProfile]
+  @Published private(set) var selectedRemoteProfileID: UUID?
+  @Published private(set) var remoteWorkspaces: [RemoteWorkspaceRecord]
+  @Published private(set) var remoteWorkspaceRuntimeStates: [UUID: RemoteWorkspaceRuntimeState] =
+    [:]
 
   let stateStore: JSONStateStore
   let gitService = GitService()
@@ -133,7 +134,13 @@ final class AppModel: ObservableObject {
     selectedTerminalID = snapshot.selectedTerminalID
     sidebarVisible = snapshot.sidebarVisible
     inspectorVisible = snapshot.inspectorVisible
-    remoteTarget = snapshot.remoteTarget
+    remoteProfiles = snapshot.remoteProfiles
+    selectedRemoteProfileID = snapshot.selectedRemoteProfileID
+    remoteWorkspaces = snapshot.remoteWorkspaces
+    remoteWorkspaceRuntimeStates = Dictionary(
+      snapshot.remoteWorkspaces.map { ($0.id, RemoteWorkspaceRuntimeState.connecting) },
+      uniquingKeysWith: { first, _ in first }
+    )
     worktreesRoot = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Developer/Worktrees", isDirectory: true)
 
@@ -188,14 +195,37 @@ final class AppModel: ObservableObject {
     return managedWorktreeState(repositoryID: selectedRepositoryID, path: selectedWorktreePath)
   }
 
-  var canCreateTerminal: Bool {
-    selectedWorktree != nil && selectedManagedWorktreeState != .available
+  var selectedRemoteProfile: SSHRemoteProfile? {
+    remoteProfiles.first { $0.id == selectedRemoteProfileID }
   }
 
-  var canHandoffSelectedTerminal: Bool {
-    guard remoteTarget.isConfigured, let terminal = selectedTerminal else { return false }
-    if case .local = terminal.executionTarget { return !isBusy }
-    return false
+  var remoteTarget: SSHRemoteTarget {
+    selectedRemoteProfile?.target ?? SSHRemoteTarget()
+  }
+
+  var selectedRemoteWorkspace: RemoteWorkspaceRecord? {
+    guard let selectedRepositoryID, let selectedWorktreePath else { return nil }
+    return remoteWorkspace(repositoryID: selectedRepositoryID, worktreePath: selectedWorktreePath)
+  }
+
+  var canCreateTerminal: Bool {
+    guard selectedWorktree != nil, selectedManagedWorktreeState != .available else { return false }
+    guard let workspace = selectedRemoteWorkspace else { return true }
+    return remoteWorkspaceRuntimeStates[workspace.id] == .connected
+  }
+
+  var canRunSelectedWorkspaceRemotely: Bool {
+    guard !isBusy, selectedRemoteProfile?.isConfigured == true,
+      let selectedRepositoryID, let selectedWorktreePath,
+      selectedRemoteWorkspace == nil,
+      selectedManagedWorktreeState != .available,
+      !hasOpenWorkspaceDocuments
+    else { return false }
+    return terminals(repositoryID: selectedRepositoryID, worktreePath: selectedWorktreePath).isEmpty
+  }
+
+  var canReconnectSelectedRemoteWorkspace: Bool {
+    !isBusy && selectedRemoteWorkspace != nil
   }
 
   var selectedWorktreeTerminals: [TerminalRecord] {
@@ -204,7 +234,9 @@ final class AppModel: ObservableObject {
   }
 
   var setupError: String? {
-    if tmuxSpec == nil { return FeatherError.tmuxUnavailable.localizedDescription }
+    if selectedRemoteWorkspace == nil, tmuxSpec == nil {
+      return FeatherError.tmuxUnavailable.localizedDescription
+    }
     return terminalRegistry.initializationError
   }
 
@@ -258,6 +290,34 @@ final class AppModel: ObservableObject {
       .sorted { $0.order < $1.order }
   }
 
+  func remoteWorkspace(
+    repositoryID: UUID,
+    worktreePath: String
+  ) -> RemoteWorkspaceRecord? {
+    WorkspaceExecutionRouter.remoteWorkspace(
+      repositoryID: repositoryID,
+      worktreePath: worktreePath,
+      in: remoteWorkspaces
+    )
+  }
+
+  func remoteWorkspace(for terminal: TerminalRecord) -> RemoteWorkspaceRecord? {
+    WorkspaceExecutionRouter.remoteWorkspace(for: terminal, in: remoteWorkspaces)
+  }
+
+  func executionTarget(for terminal: TerminalRecord) -> TerminalExecutionTarget {
+    WorkspaceExecutionRouter.target(for: terminal, in: remoteWorkspaces)
+  }
+
+  func remoteWorkspaceState(
+    repositoryID: UUID,
+    worktreePath: String
+  ) -> RemoteWorkspaceRuntimeState? {
+    guard let workspace = remoteWorkspace(repositoryID: repositoryID, worktreePath: worktreePath)
+    else { return nil }
+    return remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting
+  }
+
   func moveRepositoryToTop(_ repository: RepositoryRecord) {
     guard let index = repositories.firstIndex(where: { $0.id == repository.id }), index > 0 else {
       return
@@ -265,6 +325,10 @@ final class AppModel: ObservableObject {
     let moved = repositories.remove(at: index)
     repositories.insert(moved, at: 0)
     persist()
+  }
+
+  func updateWorkspaceDocumentState(hasOpenDocuments: Bool) {
+    hasOpenWorkspaceDocuments = hasOpenDocuments
   }
 
   func start() {
@@ -277,6 +341,7 @@ final class AppModel: ObservableObject {
         show(error)
       }
       await refreshAll()
+      await refreshRemoteWorkspaceStates()
       await ensureTerminalMonitorSession()
       updateTerminalMonitor()
     }
@@ -286,7 +351,10 @@ final class AppModel: ObservableObject {
     terminalMonitorTask?.cancel()
     terminalMonitorTask = nil
     do {
-      try await processShutdown.terminateAll(terminals: terminals)
+      try await processShutdown.terminateAll(
+        terminals: terminals,
+        remoteWorkspaces: remoteWorkspaces
+      )
     } catch {
       updateTerminalMonitor()
       throw error
@@ -401,11 +469,24 @@ final class AppModel: ObservableObject {
   }
 
   func runtimeState(for terminal: TerminalRecord) -> TerminalRuntimeState {
-    terminalRuntimeStates[terminal.id]
+    if let workspace = remoteWorkspace(for: terminal),
+      let state = remoteWorkspaceRuntimeStates[workspace.id],
+      state == .offline || state == .ownershipMismatch
+    {
+      return .offline
+    }
+    return terminalRuntimeStates[terminal.id]
       ?? (AgentKind(terminal: terminal) == nil ? .shell : .running)
   }
 
   func terminalSurfaceDidAttach(_ terminal: TerminalRecord) {
+    if let workspace = remoteWorkspace(for: terminal),
+      remoteWorkspaceRuntimeStates[workspace.id] == .offline
+        || remoteWorkspaceRuntimeStates[workspace.id] == .ownershipMismatch
+    {
+      terminalRuntimeStates[terminal.id] = .offline
+      return
+    }
     if terminalRuntimeStates[terminal.id] == nil || terminalRuntimeStates[terminal.id] == .exited {
       terminalRuntimeStates[terminal.id] =
         AgentKind(terminal: terminal) == nil ? .shell : .running
@@ -433,45 +514,40 @@ final class AppModel: ObservableObject {
     guard let repositoryID = selectedRepositoryID, let worktreePath = selectedWorktreePath else {
       return
     }
-    guard tmuxSpec != nil else {
-      presentedAlert = .error(FeatherError.tmuxUnavailable.localizedDescription)
-      return
-    }
-    guard let tmuxBackend else {
-      presentedAlert = .error(FeatherError.tmuxUnavailable.localizedDescription)
-      return
-    }
     let command = launch.command
     let terminal = makeTerminal(
       repositoryID: repositoryID,
       worktreePath: worktreePath,
       title: command == nil ? nil : launch.title
     )
+    guard let backend = terminalBackend(for: terminal) else {
+      presentedAlert = .error(FeatherError.tmuxUnavailable.localizedDescription)
+      return
+    }
+    let workingDirectory = terminalWorkingDirectory(terminal)
 
     isBusy = true
     Task {
-      var launchError: Error?
       do {
         if let command {
-          try await tmuxBackend.launchCommand(
+          try await backend.launchCommand(
             command,
             sessionID: terminal.tmuxSessionID,
-            workingDirectory: terminal.worktreePath
+            workingDirectory: workingDirectory
           )
         } else {
-          try await tmuxBackend.ensureSession(
+          try await backend.ensureSession(
             terminal.tmuxSessionID,
-            workingDirectory: terminal.worktreePath
+            workingDirectory: workingDirectory
           )
         }
+        markRemoteWorkspaceConnected(for: terminal)
+        addTerminal(terminal)
       } catch {
-        launchError = error
+        markRemoteWorkspaceOfflineIfNeeded(error, for: terminal)
+        show(error)
       }
-      addTerminal(terminal)
       isBusy = false
-      if let launchError {
-        show(launchError)
-      }
     }
   }
 
@@ -487,6 +563,7 @@ final class AppModel: ObservableObject {
           direction: direction
         )
       } catch {
+        markRemoteWorkspaceOfflineIfNeeded(error, for: terminal)
         show(error)
       }
     }
@@ -580,6 +657,11 @@ final class AppModel: ObservableObject {
   }
 
   func requestRemoveWorktree(repository: RepositoryRecord, worktree: GitWorktree) {
+    guard remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil else {
+      presentedAlert = .error(
+        FeatherError.remoteWorkspaceActive(worktree.path).localizedDescription)
+      return
+    }
     guard isManagedWorktree(repositoryID: repository.id, path: worktree.path) else {
       presentedAlert = .error(FeatherError.unmanagedWorktreeRemoval.localizedDescription)
       return
@@ -628,6 +710,11 @@ final class AppModel: ObservableObject {
   }
 
   func requestReturnWorktree(repository: RepositoryRecord, worktree: GitWorktree) {
+    guard remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil else {
+      presentedAlert = .error(
+        FeatherError.remoteWorkspaceActive(worktree.path).localizedDescription)
+      return
+    }
     guard managedWorktreeState(repositoryID: repository.id, path: worktree.path) == .active else {
       return
     }
@@ -751,13 +838,55 @@ final class AppModel: ObservableObject {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: selectedWorktreePath)])
   }
 
-  func saveRemoteTarget(_ target: SSHRemoteTarget) {
+  func selectRemoteProfile(_ id: UUID?) {
+    guard id == nil || remoteProfiles.contains(where: { $0.id == id }) else { return }
+    selectedRemoteProfileID = id
+    persist()
+  }
+
+  func saveRemoteProfile(id: UUID?, name: String, target: SSHRemoteTarget) {
     do {
-      remoteTarget = try SSHRemoteTargetValidator.validate(target)
-      presentedAlert = .message("Remote Target Saved", remoteTarget.host)
+      let profile = try SSHRemoteProfileValidator.validate(
+        id: id ?? UUID(),
+        name: name,
+        target: target
+      )
+      guard
+        !remoteProfiles.contains(where: {
+          $0.id != profile.id
+            && $0.name.caseInsensitiveCompare(profile.name) == .orderedSame
+        })
+      else {
+        presentedAlert = .error("An SSH profile named \"\(profile.name)\" already exists.")
+        return
+      }
+      if let index = remoteProfiles.firstIndex(where: { $0.id == profile.id }) {
+        remoteProfiles[index] = profile
+      } else {
+        remoteProfiles.append(profile)
+      }
+      selectedRemoteProfileID = profile.id
+      persist()
+      presentedAlert = .message("SSH Profile Saved", profile.name)
     } catch {
       show(error)
     }
+  }
+
+  func deleteRemoteProfile(_ id: UUID) {
+    guard !remoteWorkspaces.contains(where: { $0.profileID == id }) else {
+      presentedAlert = .error(
+        "This SSH profile is used by a remote workspace and cannot be deleted yet."
+      )
+      return
+    }
+    remoteProfiles.removeAll { $0.id == id }
+    if selectedRemoteProfileID == id { selectedRemoteProfileID = remoteProfiles.first?.id }
+    persist()
+  }
+
+  func remoteProfileIsInUse(_ id: UUID) -> Bool {
+    remoteWorkspaces.contains { $0.profileID == id }
   }
 
   func testRemoteTarget(_ target: SSHRemoteTarget) {
@@ -777,44 +906,114 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func requestRemoteHandoff() {
-    guard canHandoffSelectedTerminal, let terminal = selectedTerminal else { return }
-    do {
-      let target = try SSHRemoteTargetValidator.validate(remoteTarget)
-      presentedAlert = .handoffTerminal(terminal, target)
-    } catch {
-      show(error)
-    }
-  }
-
-  func confirmRemoteHandoff(_ terminal: TerminalRecord, target: SSHRemoteTarget) {
-    guard !isBusy, terminal.id == selectedTerminalID,
-      terminals.contains(where: { $0.id == terminal.id })
-    else { return }
-    guard let repository = repositories.first(where: { $0.id == terminal.repositoryID }) else {
+  func requestRunSelectedWorkspaceRemotely() {
+    guard !isBusy, let repository = selectedRepository, let worktree = selectedWorktree,
+      let profile = selectedRemoteProfile
+    else {
+      if selectedRemoteProfile == nil {
+        presentedAlert = .error("Add and select an SSH profile in Settings first.")
+      }
       return
     }
+    guard remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil else {
+      presentedAlert = .message("Already Remote", "This worktree already runs remotely.")
+      return
+    }
+    guard managedWorktreeState(repositoryID: repository.id, path: worktree.path) != .available
+    else {
+      presentedAlert = .error("Reuse this worktree before choosing a remote execution location.")
+      return
+    }
+    guard !hasOpenWorkspaceDocuments else {
+      presentedAlert = .error(
+        "Close every open file tab before switching this worktree to remote execution."
+      )
+      return
+    }
+    let activeTerminals = terminals(repositoryID: repository.id, worktreePath: worktree.path).count
+    guard activeTerminals == 0 else {
+      presentedAlert = .error(
+        "Close the \(activeTerminals) terminal\(activeTerminals == 1 ? "" : "s") in this worktree "
+          + "before switching its authoritative execution location."
+      )
+      return
+    }
+    presentedAlert = .runWorkspaceRemotely(repository, worktree, profile)
+  }
 
+  func confirmRunWorkspaceRemotely(
+    repository: RepositoryRecord,
+    worktree: GitWorktree,
+    profile: SSHRemoteProfile
+  ) {
+    guard !isBusy,
+      remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil,
+      managedWorktreeState(repositoryID: repository.id, path: worktree.path) != .available,
+      !hasOpenWorkspaceDocuments,
+      terminals(repositoryID: repository.id, worktreePath: worktree.path).isEmpty
+    else { return }
+    let workspaceID = UUID()
     isBusy = true
     Task {
       defer { isBusy = false }
       do {
-        let remote = try await remoteHandoffService.prepare(
+        let preparation = try await remoteHandoffService.prepareWorkspace(
           repository: repository,
-          worktreePath: terminal.worktreePath,
-          terminalID: terminal.id,
-          sessionID: terminal.tmuxSessionID,
-          target: target
+          worktreePath: worktree.path,
+          workspaceID: workspaceID,
+          target: profile.target
         )
-        guard let index = terminals.firstIndex(where: { $0.id == terminal.id }) else { return }
-        guard let tmuxBackend else { throw FeatherError.tmuxUnavailable }
-        try await tmuxBackend.killSession(terminal.tmuxSessionID)
-        terminalRegistry.release(terminal.id)
-        terminals[index].executionTarget = .ssh(remote)
-        terminalRuntimeStates[terminal.id] = .shell
+        let workspace = RemoteWorkspaceRecord(
+          id: workspaceID,
+          repositoryID: repository.id,
+          worktreePath: worktree.path,
+          profileID: profile.id,
+          profileName: profile.name,
+          remote: preparation.remote,
+          ownership: preparation.ownership
+        )
+        remoteWorkspaces.append(workspace)
+        remoteWorkspaceRuntimeStates[workspace.id] = .connected
         persist()
         updateTerminalMonitor()
+        presentedAlert = .message(
+          "Remote Workspace Ready",
+          "New Claude, Codex, and shell terminals for this worktree will run on \(profile.name)."
+        )
       } catch {
+        show(error)
+      }
+    }
+  }
+
+  func reconnectSelectedRemoteWorkspace() {
+    guard canReconnectSelectedRemoteWorkspace, let workspace = selectedRemoteWorkspace else {
+      return
+    }
+    isBusy = true
+    remoteWorkspaceRuntimeStates[workspace.id] = .connecting
+    Task {
+      defer { isBusy = false }
+      do {
+        let state = try await remoteHandoffService.checkWorkspace(workspace)
+        applyRemoteWorkspaceState(state, to: workspace)
+        switch state {
+        case .connected:
+          presentedAlert = .message("Remote Workspace Connected", workspace.profileName)
+        case .offline:
+          presentedAlert = .message(
+            "Remote Workspace Offline",
+            "Feather kept the workspace and session records. Try reconnecting when \(workspace.profileName) is reachable."
+          )
+        case .ownershipMismatch:
+          presentedAlert = .error(
+            "The remote ownership marker no longer matches. Feather kept the record and will not modify the checkout."
+          )
+        case .connecting:
+          break
+        }
+      } catch {
+        applyRemoteWorkspaceState(.offline, to: workspace)
         show(error)
       }
     }
@@ -838,6 +1037,7 @@ final class AppModel: ObservableObject {
     do {
       try await backend.killSession(terminal.tmuxSessionID)
     } catch {
+      markRemoteWorkspaceOfflineIfNeeded(error, for: terminal)
       show(error)
       return
     }
@@ -860,6 +1060,9 @@ final class AppModel: ObservableObject {
     defer { isBusy = false }
 
     do {
+      if let workspace = remoteWorkspaces.first(where: { $0.repositoryID == repository.id }) {
+        throw FeatherError.remoteWorkspaceActive(workspace.worktreePath)
+      }
       let ownedPaths = Set(
         managedWorktrees
           .filter { $0.repositoryID == repository.id }
@@ -989,7 +1192,10 @@ final class AppModel: ObservableObject {
       selectedTerminalID: selectedTerminalID,
       sidebarVisible: sidebarVisible,
       inspectorVisible: inspectorVisible,
-      remoteTarget: remoteTarget
+      remoteTarget: remoteTarget,
+      remoteProfiles: remoteProfiles,
+      selectedRemoteProfileID: selectedRemoteProfileID,
+      remoteWorkspaces: remoteWorkspaces
     )
     try? stateStore.save(snapshot)
   }
@@ -999,7 +1205,12 @@ final class AppModel: ObservableObject {
   }
 
   private func terminalBackend(for terminal: TerminalRecord) -> (any TerminalBackend)? {
-    switch terminal.executionTarget {
+    if let workspace = remoteWorkspace(for: terminal),
+      remoteWorkspaceRuntimeStates[workspace.id] != .connected
+    {
+      return nil
+    }
+    return switch executionTarget(for: terminal) {
     case .local:
       tmuxBackend
     case .ssh(let remote):
@@ -1008,7 +1219,7 @@ final class AppModel: ObservableObject {
   }
 
   private func terminalWorkingDirectory(_ terminal: TerminalRecord) -> String {
-    switch terminal.executionTarget {
+    switch executionTarget(for: terminal) {
     case .local: terminal.worktreePath
     case .ssh(let remote): remote.workingDirectory
     }
@@ -1017,8 +1228,8 @@ final class AppModel: ObservableObject {
   private func ensureTerminalMonitorSession() async {
     guard let tmuxBackend,
       let terminal = terminals.first(where: { terminal in
-        terminal.id == selectedTerminalID && terminal.executionTarget == .local
-      }) ?? terminals.first(where: { $0.executionTarget == .local })
+        terminal.id == selectedTerminalID && executionTarget(for: terminal) == .local
+      }) ?? terminals.first(where: { executionTarget(for: $0) == .local })
     else { return }
     try? await tmuxBackend.ensureSession(
       terminal.tmuxSessionID,
@@ -1032,7 +1243,7 @@ final class AppModel: ObservableObject {
     else { return }
 
     terminalRuntimeStates[terminalID] = .running
-    switch terminal.executionTarget {
+    switch executionTarget(for: terminal) {
     case .local:
       guard let tmuxBackend else { return }
       Task {
@@ -1059,7 +1270,7 @@ final class AppModel: ObservableObject {
 
   private func updateTerminalMonitor() {
     let hasLocalTerminal = terminals.contains { terminal in
-      if case .local = terminal.executionTarget { return true }
+      if case .local = executionTarget(for: terminal) { return true }
       return false
     }
     guard hasLocalTerminal, let tmuxBackend else {
@@ -1097,7 +1308,7 @@ final class AppModel: ObservableObject {
       return TerminalRuntimeState.exited
     }
     for terminal in terminals {
-      guard case .local = terminal.executionTarget else { continue }
+      guard case .local = executionTarget(for: terminal) else { continue }
       var state = bySession[terminal.tmuxSessionID] ?? .exited
       if state == .attention, selectedTerminalID == terminal.id, NSApp.isActive {
         try? await tmuxBackend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
@@ -1114,6 +1325,58 @@ final class AppModel: ObservableObject {
         }
       }
       terminalRuntimeStates[terminal.id] = state
+    }
+  }
+
+  private func refreshRemoteWorkspaceStates() async {
+    for workspace in remoteWorkspaces {
+      remoteWorkspaceRuntimeStates[workspace.id] = .connecting
+      do {
+        let state = try await remoteHandoffService.checkWorkspace(workspace)
+        applyRemoteWorkspaceState(state, to: workspace)
+      } catch {
+        applyRemoteWorkspaceState(.offline, to: workspace)
+      }
+    }
+  }
+
+  private func applyRemoteWorkspaceState(
+    _ state: RemoteWorkspaceRuntimeState,
+    to workspace: RemoteWorkspaceRecord
+  ) {
+    remoteWorkspaceRuntimeStates[workspace.id] = state
+    let workspaceTerminals = terminals.filter {
+      workspace.matches(repositoryID: $0.repositoryID, worktreePath: $0.worktreePath)
+    }
+    for terminal in workspaceTerminals {
+      terminalRegistry.release(terminal.id)
+      switch state {
+      case .connected:
+        if terminalRuntimeStates[terminal.id] == .offline {
+          terminalRuntimeStates[terminal.id] =
+            AgentKind(terminal: terminal) == nil ? .shell : .running
+        }
+      case .offline, .ownershipMismatch:
+        terminalRuntimeStates[terminal.id] = .offline
+      case .connecting:
+        break
+      }
+    }
+  }
+
+  private func markRemoteWorkspaceConnected(for terminal: TerminalRecord) {
+    guard let workspace = remoteWorkspace(for: terminal) else { return }
+    remoteWorkspaceRuntimeStates[workspace.id] = .connected
+  }
+
+  private func markRemoteWorkspaceOfflineIfNeeded(_ error: Error, for terminal: TerminalRecord) {
+    guard let workspace = remoteWorkspace(for: terminal) else { return }
+    if let failure = error as? BoundedCommandFailure, failure.status == 255 {
+      applyRemoteWorkspaceState(.offline, to: workspace)
+    } else if let boundedError = error as? BoundedCommandError,
+      case .timedOut = boundedError
+    {
+      applyRemoteWorkspaceState(.offline, to: workspace)
     }
   }
 
