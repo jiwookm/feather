@@ -193,6 +193,7 @@ struct PersistenceTests {
       handoff: handoff
     )
     let snapshot = ApplicationSnapshot(
+      version: 7,
       remoteProfiles: [profile],
       selectedRemoteProfileID: profile.id,
       remoteWorkspaces: [workspace, workspace]
@@ -202,9 +203,11 @@ struct PersistenceTests {
     let loaded = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
 
     #expect(loaded.remoteProfiles == [profile])
+    #expect(loaded.version == 7)
     #expect(loaded.selectedRemoteProfileID == profile.id)
     #expect(loaded.remoteWorkspaces == [workspace])
     #expect(loaded.remoteWorkspaces.first?.handoff == handoff)
+    #expect(loaded.remoteWorkspaces.first?.returned == nil)
   }
 
   @Test
@@ -231,7 +234,78 @@ struct PersistenceTests {
     let loaded = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
     #expect(loaded.version == 6)
     #expect(loaded.remoteWorkspaces.first?.handoff == nil)
-    #expect(ApplicationSnapshot.currentVersion == 7)
+    #expect(loaded.remoteWorkspaces.first?.returned == nil)
+    #expect(ApplicationSnapshot.currentVersion == 8)
+  }
+
+  @Test
+  func persistsReturnedWorkspaceAsLocalAuthorityWithCleanupMetadata() throws {
+    let repositoryID = UUID()
+    let manifest = RemoteHandoffManifest(
+      state: RemoteHandoffStateFingerprint(
+        branch: "feature/return",
+        baseCommit: String(repeating: "a", count: 40),
+        headCommit: String(repeating: "b", count: 40),
+        publishedCommit: String(repeating: "a", count: 40),
+        statusSHA256: String(repeating: "1", count: 64),
+        indexPatchSHA256: String(repeating: "2", count: 64),
+        worktreePatchSHA256: String(repeating: "3", count: 64),
+        untrackedPathsSHA256: String(repeating: "4", count: 64),
+        untrackedEntriesSHA256: String(repeating: "5", count: 64),
+        stagedPathCount: 1,
+        unstagedPathCount: 2,
+        untrackedFileCount: 3,
+        untrackedBytes: 128,
+        unpublishedCommitCount: 1
+      ),
+      bundleSHA256: String(repeating: "6", count: 64),
+      artifactBytes: 256
+    )
+    let active = RemoteWorkspaceRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      profileID: nil,
+      profileName: "Build Host",
+      remote: SSHRemoteTerminal(
+        target: SSHRemoteTarget(host: "build-host", rootPath: "/srv/feather"),
+        workingDirectory: "/srv/feather/worktrees/project",
+        tmuxConfigPath: "/srv/feather/.feather/tmux.conf"
+      ),
+      ownership: RemoteWorkspaceOwnership(
+        token: "owned-token",
+        markerPath: "/srv/feather/.feather/workspaces/project.owner"
+      ),
+      handoff: manifest
+    )
+    let returned = active.recordingReturn(
+      RemoteWorkspaceReturnRecord(
+        manifest: manifest,
+        cleanupSessionIDs: [
+          "remote-agent",
+          RemoteHandoffService.workspaceSessionID(active.id),
+          "remote-agent",
+        ]
+      )
+    )
+    let terminal = TerminalRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      title: "Codex",
+      order: 0
+    )
+    let snapshot = ApplicationSnapshot(terminals: [terminal], remoteWorkspaces: [returned])
+
+    let data = try JSONEncoder().encode(snapshot)
+    let loaded = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
+    let loadedWorkspace = try #require(loaded.remoteWorkspaces.first)
+
+    #expect(loaded.version == ApplicationSnapshot.currentVersion)
+    #expect(
+      loadedWorkspace.returned?.cleanupSessionIDs
+        == [RemoteHandoffService.workspaceSessionID(active.id), "remote-agent"].sorted()
+    )
+    #expect(!loadedWorkspace.isRemoteAuthoritative)
+    #expect(WorkspaceExecutionRouter.target(for: terminal, in: [loadedWorkspace]) == .local)
   }
 
   @Test

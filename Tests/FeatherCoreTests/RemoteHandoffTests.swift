@@ -298,6 +298,31 @@ struct RemoteHandoffTests {
     #expect(throws: RemoteHandoffError.invalidOwnershipMetadata) {
       try RemoteWorkspaceOwnershipValidator.validate(invalidManifest)
     }
+    let returnedWithoutBootstrap = RemoteWorkspaceRecord(
+      id: valid.id,
+      repositoryID: valid.repositoryID,
+      worktreePath: valid.worktreePath,
+      profileID: valid.profileID,
+      profileName: valid.profileName,
+      remote: valid.remote,
+      ownership: valid.ownership,
+      handoff: RemoteHandoffManifest(
+        state: fixtureState(),
+        bundleSHA256: nil,
+        artifactBytes: 1
+      ),
+      returned: RemoteWorkspaceReturnRecord(
+        manifest: RemoteHandoffManifest(
+          state: fixtureState(),
+          bundleSHA256: nil,
+          artifactBytes: 1
+        ),
+        cleanupSessionIDs: ["remote-agent"]
+      )
+    )
+    #expect(throws: RemoteHandoffError.invalidOwnershipMetadata) {
+      try RemoteWorkspaceOwnershipValidator.validate(returnedWithoutBootstrap)
+    }
     let state = try await RemoteHandoffService(sshExecutable: "/does/not/exist")
       .checkWorkspace(unsafe)
     #expect(state == .ownershipMismatch)

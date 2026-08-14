@@ -54,6 +54,13 @@ final class AppModel: ObservableObject {
       SSHRemoteProfile,
       RemoteHandoffPreflight
     )
+    case returnRemoteWorkspace(
+      RepositoryRecord,
+      GitWorktree,
+      RemoteWorkspaceRecord,
+      RemoteReturnPreparation
+    )
+    case cleanupRemoteWorkspace(RemoteWorkspaceRecord, RemoteCleanupPreflight)
     case message(String, String)
 
     var id: String {
@@ -65,6 +72,10 @@ final class AppModel: ObservableObject {
       case .returnWorktree(_, let worktree): "return-\(worktree.path)"
       case .runWorkspaceRemotely(let repository, let worktree, _, _):
         "remote-workspace-\(repository.id)-\(worktree.path)"
+      case .returnRemoteWorkspace(_, _, let workspace, _):
+        "return-remote-workspace-\(workspace.id)"
+      case .cleanupRemoteWorkspace(let workspace, _):
+        "cleanup-remote-workspace-\(workspace.id)"
       case .message(let title, let message): "message-\(title)-\(message)"
       }
     }
@@ -102,6 +113,7 @@ final class AppModel: ObservableObject {
   let stateStore: JSONStateStore
   let gitService = GitService()
   let remoteHandoffService: RemoteHandoffService
+  let remoteReturnService: RemoteReturnService
   let tmuxBackend: TmuxBackend?
   let tmuxSpec: TmuxLaunchSpec?
   let terminalRegistry: TerminalRegistry
@@ -129,6 +141,7 @@ final class AppModel: ObservableObject {
       controlDirectoryName: runtimeIdentity.remoteControlDirectoryName,
       tmuxSocketName: runtimeIdentity.remoteTmuxSocketName
     )
+    remoteReturnService = RemoteReturnService()
     let snapshot = (try? stateStore.load()) ?? ApplicationSnapshot()
     repositories = snapshot.repositories
     managedWorktrees = snapshot.managedWorktrees
@@ -143,7 +156,9 @@ final class AppModel: ObservableObject {
     selectedRemoteProfileID = snapshot.selectedRemoteProfileID
     remoteWorkspaces = snapshot.remoteWorkspaces
     remoteWorkspaceRuntimeStates = Dictionary(
-      snapshot.remoteWorkspaces.map { ($0.id, RemoteWorkspaceRuntimeState.connecting) },
+      snapshot.remoteWorkspaces.compactMap {
+        $0.isRemoteAuthoritative ? ($0.id, RemoteWorkspaceRuntimeState.connecting) : nil
+      },
       uniquingKeysWith: { first, _ in first }
     )
     worktreesRoot = FileManager.default.homeDirectoryForCurrentUser
@@ -213,9 +228,13 @@ final class AppModel: ObservableObject {
     return remoteWorkspace(repositoryID: selectedRepositoryID, worktreePath: selectedWorktreePath)
   }
 
+  var selectedAuthoritativeRemoteWorkspace: RemoteWorkspaceRecord? {
+    selectedRemoteWorkspace.flatMap { $0.isRemoteAuthoritative ? $0 : nil }
+  }
+
   var canCreateTerminal: Bool {
     guard selectedWorktree != nil, selectedManagedWorktreeState != .available else { return false }
-    guard let workspace = selectedRemoteWorkspace else { return true }
+    guard let workspace = selectedAuthoritativeRemoteWorkspace else { return true }
     return remoteWorkspaceRuntimeStates[workspace.id] == .connected
   }
 
@@ -230,7 +249,17 @@ final class AppModel: ObservableObject {
   }
 
   var canReconnectSelectedRemoteWorkspace: Bool {
-    !isBusy && selectedRemoteWorkspace != nil
+    !isBusy && selectedAuthoritativeRemoteWorkspace != nil
+  }
+
+  var canReturnSelectedRemoteWorkspace: Bool {
+    !isBusy && !hasOpenWorkspaceDocuments
+      && selectedAuthoritativeRemoteWorkspace?.handoff != nil
+      && selectedAuthoritativeRemoteWorkspace?.ownership != nil
+  }
+
+  var canCleanupSelectedRemoteWorkspace: Bool {
+    !isBusy && selectedRemoteWorkspace?.returned != nil
   }
 
   var selectedWorktreeTerminals: [TerminalRecord] {
@@ -239,7 +268,7 @@ final class AppModel: ObservableObject {
   }
 
   var setupError: String? {
-    if selectedRemoteWorkspace == nil, tmuxSpec == nil {
+    if selectedAuthoritativeRemoteWorkspace == nil, tmuxSpec == nil {
       return FeatherError.tmuxUnavailable.localizedDescription
     }
     return terminalRegistry.initializationError
@@ -318,7 +347,8 @@ final class AppModel: ObservableObject {
     repositoryID: UUID,
     worktreePath: String
   ) -> RemoteWorkspaceRuntimeState? {
-    guard let workspace = remoteWorkspace(repositoryID: repositoryID, worktreePath: worktreePath)
+    guard let workspace = remoteWorkspace(repositoryID: repositoryID, worktreePath: worktreePath),
+      workspace.isRemoteAuthoritative
     else { return nil }
     return remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting
   }
@@ -1015,10 +1045,170 @@ final class AppModel: ObservableObject {
     }
   }
 
-  func reconnectSelectedRemoteWorkspace() {
-    guard canReconnectSelectedRemoteWorkspace, let workspace = selectedRemoteWorkspace else {
+  func requestReturnSelectedRemoteWorkspace() {
+    guard !isBusy, let repository = selectedRepository, let worktree = selectedWorktree,
+      let workspace = selectedAuthoritativeRemoteWorkspace
+    else { return }
+    guard workspace.handoff != nil, workspace.ownership != nil else {
+      presentedAlert = .error(
+        "This saved workspace predates verified transfer metadata. Feather kept both copies and "
+          + "cannot overwrite or delete either one automatically."
+      )
       return
     }
+    guard !hasOpenWorkspaceDocuments else {
+      presentedAlert = .error(
+        "Close every open file tab before returning this workspace to the local checkout."
+      )
+      return
+    }
+    let sessionIDs = terminals(repositoryID: repository.id, worktreePath: worktree.path)
+      .map(\.tmuxSessionID)
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        let preparation = try await remoteReturnService.prepareReturn(
+          workspace: workspace,
+          localWorktreePath: worktree.path,
+          recordedSessionIDs: sessionIDs
+        )
+        guard
+          remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == workspace,
+          !hasOpenWorkspaceDocuments
+        else { return }
+        presentedAlert = .returnRemoteWorkspace(repository, worktree, workspace, preparation)
+      } catch {
+        show(error)
+      }
+    }
+  }
+
+  func confirmReturnRemoteWorkspace(
+    repository: RepositoryRecord,
+    worktree: GitWorktree,
+    workspace: RemoteWorkspaceRecord,
+    preparation: RemoteReturnPreparation
+  ) {
+    let currentSessionIDs = Set(
+      terminals(repositoryID: repository.id, worktreePath: worktree.path).map(\.tmuxSessionID)
+    )
+    guard !isBusy, !hasOpenWorkspaceDocuments,
+      remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == workspace,
+      workspace.isRemoteAuthoritative,
+      currentSessionIDs.isSubset(of: Set(preparation.recordedSessionIDs))
+    else {
+      presentedAlert = .error(
+        "The workspace or its terminal records changed after verification. Nothing was returned; "
+          + "start again so Feather can capture a fresh checkpoint."
+      )
+      return
+    }
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        let returned = try await remoteReturnService.returnWorkspace(
+          workspace,
+          to: worktree.path,
+          preparation: preparation
+        )
+        let workspaceTerminals = terminals.filter {
+          workspace.matches(repositoryID: $0.repositoryID, worktreePath: $0.worktreePath)
+        }
+        for terminal in workspaceTerminals {
+          terminalRegistry.release(terminal.id)
+          terminalRuntimeStates.removeValue(forKey: terminal.id)
+        }
+        let removedTerminalIDs = Set(workspaceTerminals.map(\.id))
+        terminals.removeAll { removedTerminalIDs.contains($0.id) }
+        if selectedTerminalID.map(removedTerminalIDs.contains) == true {
+          selectedTerminalID = nil
+        }
+        let returnedWorkspace = workspace.recordingReturn(returned)
+        if let index = remoteWorkspaces.firstIndex(where: { $0.id == workspace.id }) {
+          remoteWorkspaces[index] = returnedWorkspace
+        } else {
+          remoteWorkspaces.append(returnedWorkspace)
+        }
+        remoteWorkspaceRuntimeStates.removeValue(forKey: workspace.id)
+        persist()
+        updateTerminalMonitor()
+        presentedAlert = .message(
+          "Workspace Returned",
+          "The verified remote Git state is now local. Feather ended its recorded remote sessions "
+            + "and kept the owned remote checkout until you explicitly clean it up."
+        )
+      } catch {
+        show(error)
+      }
+    }
+  }
+
+  func requestCleanupSelectedRemoteWorkspace() {
+    guard let workspace = selectedRemoteWorkspace else { return }
+    requestCleanupRemoteWorkspace(workspace)
+  }
+
+  func requestCleanupRemoteWorkspace(_ workspace: RemoteWorkspaceRecord) {
+    guard !isBusy, workspace.returned != nil,
+      remoteWorkspaces.contains(where: { $0 == workspace })
+    else { return }
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        let preflight = try await remoteReturnService.cleanupPreflight(workspace: workspace)
+        guard remoteWorkspaces.contains(where: { $0 == workspace }) else { return }
+        presentedAlert = .cleanupRemoteWorkspace(workspace, preflight)
+      } catch {
+        show(error)
+      }
+    }
+  }
+
+  func confirmCleanupRemoteWorkspace(
+    _ workspace: RemoteWorkspaceRecord,
+    preflight: RemoteCleanupPreflight
+  ) {
+    guard !isBusy, workspace.returned != nil,
+      remoteWorkspaces.contains(where: { $0 == workspace })
+    else { return }
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        try await remoteReturnService.cleanupWorkspace(
+          workspace,
+          endingActiveSessions: preflight.activeSessionCount > 0
+        )
+        remoteWorkspaces.removeAll { $0.id == workspace.id }
+        remoteWorkspaceRuntimeStates.removeValue(forKey: workspace.id)
+        persist()
+        presentedAlert = .message(
+          "Remote Copy Removed",
+          "Feather verified ownership and removed only its recorded checkout on "
+            + "\(workspace.profileName)."
+        )
+      } catch {
+        show(error)
+      }
+    }
+  }
+
+  func reconnectSelectedRemoteWorkspace() {
+    guard canReconnectSelectedRemoteWorkspace,
+      let workspace = selectedAuthoritativeRemoteWorkspace
+    else {
+      return
+    }
+    reconnectRemoteWorkspace(workspace)
+  }
+
+  func reconnectRemoteWorkspace(_ workspace: RemoteWorkspaceRecord) {
+    guard !isBusy, workspace.isRemoteAuthoritative,
+      remoteWorkspaces.contains(where: { $0 == workspace })
+    else { return }
     isBusy = true
     remoteWorkspaceRuntimeStates[workspace.id] = .connecting
     Task {
@@ -1356,7 +1546,7 @@ final class AppModel: ObservableObject {
   }
 
   private func refreshRemoteWorkspaceStates() async {
-    for workspace in remoteWorkspaces {
+    for workspace in remoteWorkspaces where workspace.isRemoteAuthoritative {
       remoteWorkspaceRuntimeStates[workspace.id] = .connecting
       do {
         _ = try await reconcileRemoteWorkspace(workspace)
@@ -1426,7 +1616,7 @@ final class AppModel: ObservableObject {
   }
 
   private func refreshSelectedRemoteTerminalStatesIfNeeded() {
-    guard let workspace = selectedRemoteWorkspace,
+    guard let workspace = selectedAuthoritativeRemoteWorkspace,
       remoteWorkspaceRuntimeStates[workspace.id] == .connected
     else { return }
     Task {

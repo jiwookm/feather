@@ -81,7 +81,7 @@ struct RemoteGitStateTransferPayload: Sendable {
   let archiveSHA256: String
 }
 
-private struct CapturedUntrackedEntry: Sendable {
+struct CapturedUntrackedEntry: Sendable {
   enum Kind: String, Sendable {
     case file = "f"
     case symbolicLink = "l"
@@ -105,7 +105,7 @@ private struct CapturedUntrackedEntry: Sendable {
   }
 }
 
-private struct CapturedRemoteGitState: Sendable {
+struct CapturedRemoteGitState: Sendable {
   let origin: String
   let fingerprint: RemoteHandoffStateFingerprint
   let status: Data
@@ -136,7 +136,10 @@ actor RemoteGitStateTransfer {
     self.fileManager = fileManager
   }
 
-  func buildPayload(worktreePath: String) async throws -> RemoteGitStateTransferPayload {
+  func buildPayload(
+    worktreePath: String,
+    relativeTo referenceState: RemoteHandoffStateFingerprint? = nil
+  ) async throws -> RemoteGitStateTransferPayload {
     let temporaryRoot = fileManager.temporaryDirectory.appendingPathComponent(
       "Feather Remote Transfer \(UUID().uuidString)",
       isDirectory: true
@@ -148,7 +151,8 @@ actor RemoteGitStateTransfer {
 
     let capture = try await captureState(
       worktreePath: worktreePath,
-      untrackedCopyRoot: untrackedRoot
+      untrackedCopyRoot: untrackedRoot,
+      relativeTo: referenceState
     )
     try capture.status.write(to: payloadRoot.appendingPathComponent("status.snapshot"))
     try capture.indexPatch.write(to: payloadRoot.appendingPathComponent("index.patch"))
@@ -219,13 +223,21 @@ actor RemoteGitStateTransfer {
     )
   }
 
-  func captureFingerprint(worktreePath: String) async throws -> RemoteHandoffStateFingerprint {
-    try await captureState(worktreePath: worktreePath, untrackedCopyRoot: nil).fingerprint
+  func captureFingerprint(
+    worktreePath: String,
+    relativeTo referenceState: RemoteHandoffStateFingerprint? = nil
+  ) async throws -> RemoteHandoffStateFingerprint {
+    try await captureState(
+      worktreePath: worktreePath,
+      untrackedCopyRoot: nil,
+      relativeTo: referenceState
+    ).fingerprint
   }
 
-  private func captureState(
+  func captureState(
     worktreePath: String,
-    untrackedCopyRoot: URL?
+    untrackedCopyRoot: URL?,
+    relativeTo referenceState: RemoteHandoffStateFingerprint? = nil
   ) async throws -> CapturedRemoteGitState {
     let branchOutput = try await git(
       ["-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -245,15 +257,33 @@ actor RemoteGitStateTransfer {
     guard originOutput.status == 0, !origin.isEmpty else { throw RemoteHandoffError.missingOrigin }
     try Self.validateOrigin(origin)
 
-    let remoteBranch = try await remoteCommit(
-      worktreePath: worktreePath,
-      reference: "refs/heads/\(branch)"
-    )
-    let baseCommit = try await resolveBaseCommit(
-      worktreePath: worktreePath,
-      headCommit: headCommit,
-      publishedCommit: remoteBranch
-    )
+    let remoteBranch: String?
+    let baseCommit: String
+    if let referenceState {
+      guard branch == referenceState.branch,
+        try await commitExists(worktreePath: worktreePath, commit: referenceState.baseCommit)
+      else { throw RemoteHandoffError.invalidGitState }
+      let ancestor = try await git(
+        [
+          "-C", worktreePath, "merge-base", "--is-ancestor", referenceState.baseCommit,
+          headCommit,
+        ],
+        allowFailure: true
+      )
+      guard ancestor.status == 0 else { throw RemoteHandoffError.remoteBranchDiverged }
+      remoteBranch = referenceState.publishedCommit
+      baseCommit = referenceState.baseCommit
+    } else {
+      remoteBranch = try await remoteCommit(
+        worktreePath: worktreePath,
+        reference: "refs/heads/\(branch)"
+      )
+      baseCommit = try await resolveBaseCommit(
+        worktreePath: worktreePath,
+        headCommit: headCommit,
+        publishedCommit: remoteBranch
+      )
+    }
     let unpublishedCommitCount = try await revisionCount(
       worktreePath: worktreePath,
       range: "\(baseCommit)..\(headCommit)"
@@ -546,7 +576,7 @@ actor RemoteGitStateTransfer {
     return output
   }
 
-  private static func captureUntrackedEntries(
+  static func captureUntrackedEntries(
     paths: [String],
     worktreePath: String,
     copyRoot: URL?,
@@ -656,7 +686,7 @@ actor RemoteGitStateTransfer {
     return entries
   }
 
-  private static func nulSeparatedPaths(_ data: Data) throws -> [String] {
+  static func nulSeparatedPaths(_ data: Data) throws -> [String] {
     try data.split(separator: 0).map { bytes in
       guard let value = String(data: Data(bytes), encoding: .utf8) else {
         throw RemoteHandoffError.unsupportedUntrackedPath("non-UTF-8 path")
@@ -704,7 +734,7 @@ actor RemoteGitStateTransfer {
     else { throw RemoteHandoffError.credentialBearingOrigin }
   }
 
-  private static func directoryByteCount(_ url: URL, fileManager: FileManager) throws -> Int64 {
+  static func directoryByteCount(_ url: URL, fileManager: FileManager) throws -> Int64 {
     guard
       let enumerator = fileManager.enumerator(
         at: url,
@@ -722,11 +752,11 @@ actor RemoteGitStateTransfer {
     return total
   }
 
-  private static func sha256(_ data: Data) -> String {
+  static func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
-  private static func sha256File(_ url: URL) throws -> (hash: String, byteCount: Int64) {
+  static func sha256File(_ url: URL) throws -> (hash: String, byteCount: Int64) {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     var hasher = SHA256()
