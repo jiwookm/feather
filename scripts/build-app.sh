@@ -4,13 +4,30 @@ set -euo pipefail
 
 script_directory=${0:A:h}
 project_root=${script_directory:h}
-application_path="$project_root/dist/Feather.app"
-expected_application_path="$project_root/dist/Feather.app"
 signing_identity=${FEATHER_SIGN_IDENTITY:--}
 release_version=${FEATHER_RELEASE_VERSION:-}
 build_number=${FEATHER_BUILD_NUMBER:-}
+build_variant=${FEATHER_BUILD_VARIANT:-development}
 
-if [[ "$application_path" != "$expected_application_path" ]]; then
+case "$build_variant" in
+  development)
+    application_name="Feather Dev"
+    bundle_identifier="com.jiwookim.feather.dev"
+    ;;
+  production)
+    application_name="Feather"
+    bundle_identifier="com.jiwookim.feather"
+    ;;
+  *)
+    print -u2 "FEATHER_BUILD_VARIANT must be development or production."
+    exit 1
+    ;;
+esac
+
+application_path="$project_root/dist/$application_name.app"
+
+if [[ "$application_path" != "$project_root/dist/Feather.app" \
+  && "$application_path" != "$project_root/dist/Feather Dev.app" ]]; then
     print -u2 "Refusing to package an unexpected path: $application_path"
     exit 1
 fi
@@ -42,6 +59,13 @@ binary_directory=$(/usr/bin/swift build --configuration release --arch arm64 --s
 /bin/cp "$project_root/Resources/Fonts/Geist.ttf" "$application_path/Contents/Resources/Fonts/Geist.ttf"
 /bin/cp "$project_root/Resources/Fonts/Geist-LICENSE.txt" "$application_path/Contents/Resources/Fonts/Geist-LICENSE.txt"
 /bin/chmod 755 "$application_path/Contents/MacOS/Feather"
+
+/usr/libexec/PlistBuddy \
+    -c "Set :CFBundleDisplayName $application_name" \
+    -c "Set :CFBundleName $application_name" \
+    -c "Set :CFBundleIdentifier $bundle_identifier" \
+    -c "Set :FeatherBuildVariant $build_variant" \
+    "$application_path/Contents/Info.plist"
 
 if [[ -n "$release_version" ]]; then
     /usr/libexec/PlistBuddy \

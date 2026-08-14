@@ -57,16 +57,25 @@ Feather uses SwiftUI for low-frequency application chrome and AppKit for the ter
 ```sh
 brew install tmux ripgrep
 ./scripts/build-app.sh
-open dist/Feather.app
+open "dist/Feather Dev.app"
 ```
 
-The packaging script always requests an arm64 release build and creates a standard app bundle. It applies an ad-hoc signature unless `FEATHER_SIGN_IDENTITY` names a Developer ID Application identity. Run every release check with:
+The packaging script always requests an arm64 release build. By default it creates an isolated
+`Feather Dev.app` with its own app identity, saved state, and local/remote tmux namespace, so it can
+run beside an installed release without sharing conversations. It applies an ad-hoc signature
+unless `FEATHER_SIGN_IDENTITY` names a Developer ID Application identity. Run every release check
+with:
 
 ```sh
 ./scripts/check-release.sh
 ```
 
-For direct distribution, first build with `FEATHER_SIGN_IDENTITY`, then set `FEATHER_NOTARY_PROFILE` to a `notarytool` keychain profile and run `./scripts/notarize-app.sh`. This follows Apple's [Developer ID notarization workflow](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). GitHub Actions runs the same arm64 release checks on the standard `macos-15` Apple-silicon runner.
+The release check explicitly builds the production `dist/Feather.app`; direct production builds
+can set `FEATHER_BUILD_VARIANT=production`.
+
+For direct distribution, build with `FEATHER_BUILD_VARIANT=production` and
+`FEATHER_SIGN_IDENTITY`, then set `FEATHER_NOTARY_PROFILE` to a `notarytool` keychain profile and
+run `./scripts/notarize-app.sh`. This follows Apple's [Developer ID notarization workflow](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution). GitHub Actions runs the same arm64 release checks on the standard `macos-15` Apple-silicon runner.
 
 On first launch, choose **Add Project**, then use the project's **New Worktree** action. A new worktree opens with no terminal; choose Claude, Codex, or Terminal from its empty state. In any selected worktree, clicking the tab-bar `+` or pressing Command-T opens the same three choices.
 

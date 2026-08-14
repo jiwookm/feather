@@ -15,10 +15,20 @@ cd "$project_root"
     "$script_directory/performance-report.sh"
 /usr/bin/swift format lint --recursive --strict Sources Tests Package.swift
 /usr/bin/swift test --no-parallel
-"$script_directory/build-app.sh"
+FEATHER_BUILD_VARIANT=production "$script_directory/build-app.sh"
 /usr/bin/git diff --check
 
 binary="$project_root/dist/Feather.app/Contents/MacOS/Feather"
+bundle_identifier=$(/usr/libexec/PlistBuddy \
+    -c "Print :CFBundleIdentifier" \
+    "$project_root/dist/Feather.app/Contents/Info.plist")
+build_variant=$(/usr/libexec/PlistBuddy \
+    -c "Print :FeatherBuildVariant" \
+    "$project_root/dist/Feather.app/Contents/Info.plist")
+if [[ "$bundle_identifier" != "com.jiwookim.feather" || "$build_variant" != "production" ]]; then
+    print -u2 "Release build has the wrong runtime identity."
+    exit 1
+fi
 architecture=$(/usr/bin/file "$binary")
 if [[ "$architecture" != *"arm64"* || "$architecture" == *"x86_64"* ]]; then
     print -u2 "Release binary is not arm64-only: $architecture"

@@ -95,20 +95,33 @@ final class AppModel: ObservableObject {
 
   let stateStore: JSONStateStore
   let gitService = GitService()
-  let remoteHandoffService = RemoteHandoffService()
+  let remoteHandoffService: RemoteHandoffService
   let tmuxBackend: TmuxBackend?
   let tmuxSpec: TmuxLaunchSpec?
   let terminalRegistry: TerminalRegistry
   let worktreesRoot: URL
+  let runtimeIdentity: FeatherRuntimeIdentity
   private var hasStarted = false
   private var terminalMonitorTask: Task<Void, Never>?
 
-  init() {
+  init(runtimeIdentity: FeatherRuntimeIdentity = .current) {
+    self.runtimeIdentity = runtimeIdentity
     let fallbackSupport = FileManager.default.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library/Application Support/Feather", isDirectory: true)
+      .appendingPathComponent("Library/Application Support", isDirectory: true)
+      .appendingPathComponent(
+        runtimeIdentity.applicationSupportDirectoryName,
+        isDirectory: true
+      )
     let applicationSupportURL =
-      (try? JSONStateStore.applicationSupportURL()) ?? fallbackSupport
+      (try? JSONStateStore.applicationSupportURL(
+        directoryName: runtimeIdentity.applicationSupportDirectoryName,
+        legacyDirectoryName: runtimeIdentity.legacyApplicationSupportDirectoryName
+      )) ?? fallbackSupport
     stateStore = JSONStateStore(fileURL: applicationSupportURL.appendingPathComponent("state.json"))
+    remoteHandoffService = RemoteHandoffService(
+      controlDirectoryName: runtimeIdentity.remoteControlDirectoryName,
+      tmuxSocketName: runtimeIdentity.remoteTmuxSocketName
+    )
     let snapshot = (try? stateStore.load()) ?? ApplicationSnapshot()
     repositories = snapshot.repositories
     managedWorktrees = snapshot.managedWorktrees
@@ -123,7 +136,10 @@ final class AppModel: ObservableObject {
     worktreesRoot = FileManager.default.homeDirectoryForCurrentUser
       .appendingPathComponent("Developer/Worktrees", isDirectory: true)
 
-    let preparedSpec = try? TmuxEnvironment.prepare(applicationSupportURL: applicationSupportURL)
+    let preparedSpec = try? TmuxEnvironment.prepare(
+      applicationSupportURL: applicationSupportURL,
+      socketName: runtimeIdentity.localTmuxSocketName
+    )
     tmuxSpec = preparedSpec
     tmuxBackend = preparedSpec.map { TmuxBackend(spec: $0) }
     terminalRegistry = TerminalRegistry(

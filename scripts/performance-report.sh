@@ -41,7 +41,7 @@ if [[ -d "$application_path" ]]; then
   print "bundle_kib=$bundle_kib"
   print "binary=$architecture"
 else
-  print "bundle=missing (run scripts/build-app.sh)"
+  print "bundle=missing (run scripts/check-release.sh)"
 fi
 
 app_pids=(${(f)"$(/usr/bin/pgrep -x Feather 2>/dev/null || true)"})

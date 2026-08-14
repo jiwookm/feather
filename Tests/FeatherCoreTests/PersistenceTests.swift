@@ -26,6 +26,31 @@ struct PersistenceTests {
   }
 
   @Test
+  func isolatedApplicationSupportDoesNotMoveProductionData() throws {
+    let temporaryRoot = FileManager.default.temporaryDirectory
+      .appendingPathComponent("feather-isolation-\(UUID().uuidString)", isDirectory: true)
+    let productionRoot = temporaryRoot.appendingPathComponent("Feather", isDirectory: true)
+    let productionState = productionRoot.appendingPathComponent("state.json")
+    defer { try? FileManager.default.removeItem(at: temporaryRoot) }
+
+    try FileManager.default.createDirectory(
+      at: productionRoot,
+      withIntermediateDirectories: true
+    )
+    try Data("production-state".utf8).write(to: productionState)
+
+    let result = JSONStateStore.applicationSupportURL(
+      in: temporaryRoot,
+      directoryName: "Feather Dev",
+      legacyDirectoryName: nil
+    )
+
+    #expect(result == temporaryRoot.appendingPathComponent("Feather Dev", isDirectory: true))
+    #expect(!FileManager.default.fileExists(atPath: result.path))
+    #expect(try Data(contentsOf: productionState) == Data("production-state".utf8))
+  }
+
+  @Test
   func snapshotRoundTrips() throws {
     let temporaryRoot = FileManager.default.temporaryDirectory
       .appendingPathComponent("feather-state-\(UUID().uuidString)", isDirectory: true)
