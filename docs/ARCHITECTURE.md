@@ -88,14 +88,16 @@ For a newly allocated checkout, Feather performs one optional macOS-native warm-
 
 Removing an entire project always asks whether its Feather-created worktrees should be kept or deleted. Both choices explicitly end that project's terminal sessions; deletion preflights every owned worktree before removing any of them.
 
-## Clean SSH handoff
+## Remote workspace boundary
 
-Handoff is not live process migration. A macOS process cannot be transplanted into a Linux VPS. The implemented first slice is a conservative checkpoint and restart:
+Remote execution is not live process migration. A macOS process cannot be transplanted into a Linux VPS. The implemented boundary is a conservative, worktree-level checkpoint and restart:
 
-1. Validate one user-configured OpenSSH host alias, port, and absolute root. Feather stores no password, private key, cloud token, or agent credential.
+1. Validate a selected named OpenSSH profile containing only a display name, host alias, port, and absolute root. Feather stores no password, private key, cloud token, or agent credential.
 2. Require a named branch, an empty tracked/untracked status, and an exact match between local `HEAD` and the branch currently advertised by `origin`. Feather never pushes as part of handoff.
-3. Over non-interactive system SSH, verify Git, tmux, and base64; clone `origin` into a unique path beneath the configured root; check out the verified commit; and start a remote private tmux session.
-4. Print a bounded handoff summary into that session, end the local tmux session only after explicit confirmation and successful remote preparation, then preserve the terminal UUID while changing its execution target.
-5. Attach the existing native surface through `/usr/bin/ssh -tt` and route pane lifecycle commands through the same `TerminalBackend` boundary.
+3. Require all terminals for the worktree to be closed before changing authority. Over non-interactive system SSH, verify Git, tmux, and base64; clone `origin` into a unique path beneath the configured root; check out the verified commit; write both central and checkout-bound ownership markers; and start a bootstrap session in the remote private tmux server.
+4. Persist one remote-workspace record keyed by repository and local worktree path. Every later Claude, Codex, or shell terminal resolves through that record, so sibling tabs cannot disagree about execution location.
+5. On app restart, verify the remote checkout and both ownership markers before attaching a native surface through `/usr/bin/ssh -tt`. An unreachable host becomes `offline`; Feather keeps its workspace and session records and retries only from startup or explicit user action, never an idle polling loop.
+6. Do not expose the local Files, Changes, GitHub review, Quick Open, or repository-search paths while remote authority is active; the local checkout is a checkpoint, not a current view of remote state.
+7. Legacy snapshots that stored SSH metadata on one terminal migrate to one worktree record while local-only snapshots retain their existing behavior.
 
-This slice intentionally omits dirty-file transfer, automatic provisioning, continuous synchronization, remote checkout deletion, agent forwarding, and provider-session copying. Claude Code and Codex session identifiers may be used manually only when their session data is already available on the target; otherwise the generated summary is the restart boundary. A later dirty-state design must add an explicit encrypted delta and ownership record without weakening the clean path or placing credentials in the renderer.
+This slice intentionally omits dirty-file transfer, automatic provisioning, continuous synchronization, remote checkout deletion/return, agent forwarding, and provider-session copying. A later dirty-state design must add an explicit bounded transfer without weakening the clean path or placing credentials in the renderer.

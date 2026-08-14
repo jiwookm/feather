@@ -53,12 +53,16 @@ final class TerminalRegistry {
     }
   }
 
-  func handle(for terminal: TerminalRecord, appearance: AppearancePreference) -> TerminalHandle? {
+  func handle(
+    for terminal: TerminalRecord,
+    executionTarget: TerminalExecutionTarget? = nil,
+    appearance: AppearancePreference
+  ) -> TerminalHandle? {
     if let existing = handles[terminal.id] { return existing }
     guard let configURL else { return nil }
 
     let attachCommand: String
-    switch terminal.executionTarget {
+    switch executionTarget ?? terminal.executionTarget {
     case .local:
       guard let launchSpec else { return nil }
       attachCommand = launchSpec.attachCommand(

@@ -30,6 +30,15 @@ public actor SSHTmuxBackend: TerminalBackend {
     ])
   }
 
+  public func launchCommand(
+    _ command: String,
+    sessionID: String,
+    workingDirectory: String
+  ) async throws {
+    guard try await sessionExists(sessionID) == false else { return }
+    _ = try await run(Self.launchArguments(command, sessionID: sessionID, remote: remote))
+  }
+
   public func foregroundCommand(_ sessionID: String) async throws -> String? {
     try await activePane(sessionID)?.command
   }
@@ -94,10 +103,7 @@ public actor SSHTmuxBackend: TerminalBackend {
     _ arguments: [String],
     allowFailure: Bool = false
   ) async throws -> BoundedCommandOutput {
-    let command =
-      ([
-        "tmux", "-L", remote.tmuxSocketName, "-f", remote.tmuxConfigPath,
-      ] + arguments).map(POSIXShell.quote).joined(separator: " ")
+    let command = Self.tmuxCommand(remote: remote, arguments: arguments)
     let output = try await runner.run(
       sshExecutable,
       arguments: [
@@ -111,6 +117,25 @@ public actor SSHTmuxBackend: TerminalBackend {
       throw failure(output)
     }
     return output
+  }
+
+  static func tmuxCommand(remote: SSHRemoteTerminal, arguments: [String]) -> String {
+    ([
+      "tmux", "-L", remote.tmuxSocketName, "-f", remote.tmuxConfigPath,
+    ] + arguments).map(POSIXShell.quote).joined(separator: " ")
+  }
+
+  static func launchArguments(
+    _ command: String,
+    sessionID: String,
+    remote: SSHRemoteTerminal
+  ) -> [String] {
+    let shellCommand = "\(command); exec \"${SHELL:-/bin/sh}\" -l"
+    return [
+      "new-session", "-d", "-s", sessionID,
+      "-c", remote.workingDirectory,
+      "--", "/usr/bin/env", "-u", "NO_COLOR", "/bin/sh", "-lc", shellCommand,
+    ]
   }
 
   private func failure(_ output: BoundedCommandOutput) -> BoundedCommandFailure {

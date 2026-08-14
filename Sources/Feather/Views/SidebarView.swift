@@ -125,6 +125,10 @@ struct SidebarView: View {
     let isCollapsed = collapsedRepositories.contains(repository.id)
     let hasChildren = pendingWorktree != nil || !managedWorktrees.isEmpty
     let mainAgents = agentSessions(repositoryID: repository.id, worktreePath: repository.path)
+    let mainRemoteWorkspace = model.remoteWorkspace(
+      repositoryID: repository.id,
+      worktreePath: repository.path
+    )
     let mainSelected =
       model.selectedRepositoryID == repository.id
       && model.selectedWorktreePath == repository.path
@@ -161,6 +165,13 @@ struct SidebarView: View {
           AgentSessionBadges(sessions: mainAgents)
         }
 
+        if let mainRemoteWorkspace {
+          Image(systemName: "network")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(palette.secondaryText)
+            .help("Runs remotely on \(mainRemoteWorkspace.profileName)")
+        }
+
         if hasChildren {
           Button {
             if isCollapsed {
@@ -179,6 +190,17 @@ struct SidebarView: View {
         Menu {
           Button("New Worktree") {
             model.createWorktree(for: repository)
+          }
+          if mainRemoteWorkspace == nil {
+            Button("Run Remotely…") {
+              model.selectWorktree(repositoryID: repository.id, path: repository.path)
+              model.requestRunSelectedWorkspaceRemotely()
+            }
+          } else {
+            Button("Reconnect Remote Workspace") {
+              model.selectWorktree(repositoryID: repository.id, path: repository.path)
+              model.reconnectSelectedRemoteWorkspace()
+            }
           }
           Button("Move Project to Top") {
             model.moveRepositoryToTop(repository)
@@ -276,14 +298,21 @@ struct SidebarView: View {
     let isAvailable =
       model.managedWorktreeState(repositoryID: repository.id, path: worktree.path) == .available
     let agents = agentSessions(repositoryID: repository.id, worktreePath: worktree.path)
+    let remoteWorkspace = model.remoteWorkspace(
+      repositoryID: repository.id,
+      worktreePath: worktree.path
+    )
     return Button {
       model.selectWorktree(repositoryID: repository.id, path: worktree.path)
     } label: {
       HStack(spacing: 8) {
-        Image(systemName: isAvailable ? "shippingbox" : "arrow.triangle.branch")
-          .font(.system(size: 11, weight: .medium))
-          .foregroundStyle(selected ? palette.accent : palette.secondaryText)
-          .frame(width: 14)
+        Image(
+          systemName: remoteWorkspace != nil
+            ? "network" : (isAvailable ? "shippingbox" : "arrow.triangle.branch")
+        )
+        .font(.system(size: 11, weight: .medium))
+        .foregroundStyle(selected ? palette.accent : palette.secondaryText)
+        .frame(width: 14)
 
         Text(worktree.branchDisplayName ?? worktree.displayName)
           .font(.feather(size: 14, weight: selected ? .semibold : .regular))
@@ -294,6 +323,13 @@ struct SidebarView: View {
 
         if !agents.isEmpty {
           AgentSessionBadges(sessions: agents)
+        }
+
+        if let remoteWorkspace {
+          Text(remoteWorkspace.profileName)
+            .font(.feather(size: 10, weight: .medium))
+            .foregroundStyle(palette.mutedText)
+            .lineLimit(1)
         }
 
         if isAvailable {
@@ -313,7 +349,12 @@ struct SidebarView: View {
       Button("Open in Finder") {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.path)])
       }
-      if isAvailable {
+      if remoteWorkspace != nil {
+        Button("Reconnect Remote Workspace") {
+          model.selectWorktree(repositoryID: repository.id, path: worktree.path)
+          model.reconnectSelectedRemoteWorkspace()
+        }
+      } else if isAvailable {
         Button("Reuse Worktree") {
           model.reuseWorktree(repository: repository, worktree: worktree)
         }
@@ -322,13 +363,19 @@ struct SidebarView: View {
           model.selectWorktree(repositoryID: repository.id, path: worktree.path)
           NotificationCenter.default.post(name: .featherNewTerminalRequested, object: nil)
         }
+        Button("Run Remotely…") {
+          model.selectWorktree(repositoryID: repository.id, path: worktree.path)
+          model.requestRunSelectedWorkspaceRemotely()
+        }
         Button("Return for Reuse…") {
           model.requestReturnWorktree(repository: repository, worktree: worktree)
         }
       }
-      Divider()
-      Button("Remove Worktree", role: .destructive) {
-        model.requestRemoveWorktree(repository: repository, worktree: worktree)
+      if remoteWorkspace == nil {
+        Divider()
+        Button("Remove Worktree", role: .destructive) {
+          model.requestRemoveWorktree(repository: repository, worktree: worktree)
+        }
       }
     }
     .help(worktree.path)

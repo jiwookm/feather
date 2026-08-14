@@ -33,6 +33,7 @@ struct InspectorView: View {
   @Environment(\.colorScheme) private var colorScheme
   let repository: RepositoryRecord?
   let worktree: GitWorktree?
+  let remoteWorkspace: RemoteWorkspaceRecord?
   let isFullScreen: Bool
   let selectedDocumentPath: String?
   let onOpenFile: (String) -> Void
@@ -92,23 +93,35 @@ struct InspectorView: View {
         } else if let worktree {
           switch selectedTab {
           case .files:
-            FileInspectorView(
-              rootPath: worktree.path,
-              selectedDocumentPath: selectedDocumentPath,
-              onOpenFile: onOpenFile
-            )
+            if let remoteWorkspace {
+              remoteCheckpointPlaceholder(remoteWorkspace)
+            } else {
+              FileInspectorView(
+                rootPath: worktree.path,
+                selectedDocumentPath: selectedDocumentPath,
+                onOpenFile: onOpenFile
+              )
+            }
           case .changes:
-            SourceControlInspectorView(
-              rootPath: worktree.path,
-              selectedDocumentPath: selectedDocumentPath,
-              onOpenDiff: onOpenDiff,
-              onOpenReviewDiff: onOpenReviewDiff
-            )
+            if let remoteWorkspace {
+              remoteCheckpointPlaceholder(remoteWorkspace)
+            } else {
+              SourceControlInspectorView(
+                rootPath: worktree.path,
+                selectedDocumentPath: selectedDocumentPath,
+                onOpenDiff: onOpenDiff,
+                onOpenReviewDiff: onOpenReviewDiff
+              )
+            }
           case .github:
-            GitHubInspectorView(
-              rootPath: worktree.path,
-              repository: repository
-            )
+            if let remoteWorkspace {
+              remoteCheckpointPlaceholder(remoteWorkspace)
+            } else {
+              GitHubInspectorView(
+                rootPath: worktree.path,
+                repository: repository
+              )
+            }
           case .usage:
             EmptyView()
           }
@@ -140,6 +153,15 @@ struct InspectorView: View {
         .frame(maxWidth: 230)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  private func remoteCheckpointPlaceholder(_ workspace: RemoteWorkspaceRecord) -> some View {
+    inspectorPlaceholder(
+      symbol: "network",
+      title: "Files are remote",
+      message:
+        "\(workspace.profileName) owns the current checkout. Feather will not present or modify the local checkpoint as though it were current."
+    )
   }
 }
 

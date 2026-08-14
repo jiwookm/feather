@@ -132,6 +132,42 @@ struct ApplicationLifecycleTests {
     }
   }
 
+  @Test
+  func workspaceLevelRemoteAuthorityDoesNotRequireTheLocalServer() async throws {
+    let events = EventRecorder()
+    let repositoryID = UUID()
+    let worktreePath = "/tmp/remote-worktree"
+    let remote = remote(host: "builder")
+    let terminal = TerminalRecord(
+      repositoryID: repositoryID,
+      worktreePath: worktreePath,
+      title: "Codex",
+      order: 0,
+      executionTarget: .local
+    )
+    let workspace = RemoteWorkspaceRecord(
+      repositoryID: repositoryID,
+      worktreePath: worktreePath,
+      profileID: nil,
+      profileName: "Builder",
+      remote: remote,
+      ownership: nil
+    )
+    let shutdown = FeatherProcessShutdown(
+      terminateLocalServer: nil,
+      terminateRemoteServer: { remote in
+        await events.append("remote:\(remote.target.host)")
+      }
+    )
+
+    try await shutdown.terminateAll(
+      terminals: [terminal],
+      remoteWorkspaces: [workspace]
+    )
+
+    #expect(await events.values() == ["remote:builder"])
+  }
+
   private func terminal(
     target: TerminalExecutionTarget,
     sessionID: String
