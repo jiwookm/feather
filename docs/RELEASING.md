@@ -33,7 +33,7 @@ configuration fails closed.
 Build and package the current source version without publishing:
 
 ```sh
-FEATHER_RELEASE_VERSION=0.1.0 ./scripts/build-app.sh
+FEATHER_BUILD_VARIANT=production FEATHER_RELEASE_VERSION=0.1.0 ./scripts/build-app.sh
 FEATHER_RELEASE_VERSION=0.1.0 FEATHER_DISTRIBUTION_MODE=unsigned \
   ./scripts/package-release.sh
 ```

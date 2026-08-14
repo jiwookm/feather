@@ -74,15 +74,21 @@ public actor RemoteHandoffService {
   private let runner: BoundedCommandRunner
   private let gitExecutable: String
   private let sshExecutable: String
+  private let controlDirectoryName: String
+  private let tmuxSocketName: String
 
   public init(
     runner: BoundedCommandRunner = BoundedCommandRunner(),
     gitExecutable: String = "/usr/bin/git",
-    sshExecutable: String = "/usr/bin/ssh"
+    sshExecutable: String = "/usr/bin/ssh",
+    controlDirectoryName: String = ".feather",
+    tmuxSocketName: String = "feather"
   ) {
     self.runner = runner
     self.gitExecutable = gitExecutable
     self.sshExecutable = sshExecutable
+    self.controlDirectoryName = controlDirectoryName
+    self.tmuxSocketName = tmuxSocketName
   }
 
   public func prepare(
@@ -140,7 +146,7 @@ public actor RemoteHandoffService {
     let repositoryName = Self.slug(repository.displayName)
     let worktreeName = Self.slug(URL(fileURLWithPath: worktreePath).lastPathComponent)
     let destination = "\(target.rootPath)/worktrees/\(repositoryName)-\(worktreeName)-\(suffix)"
-    let controlRoot = "\(target.rootPath)/.feather"
+    let controlRoot = "\(target.rootPath)/\(controlDirectoryName)"
     let configPath = "\(controlRoot)/tmux.conf"
     let summaryPath = "\(controlRoot)/handoffs/\(sessionID).txt"
     let summary = Self.handoffSummary(
@@ -158,7 +164,8 @@ public actor RemoteHandoffService {
       configPath: configPath,
       summaryPath: summaryPath,
       summary: summary,
-      sessionID: sessionID
+      sessionID: sessionID,
+      tmuxSocketName: tmuxSocketName
     )
 
     let remote = try await runner.run(
@@ -180,7 +187,8 @@ public actor RemoteHandoffService {
     return SSHRemoteTerminal(
       target: target,
       workingDirectory: destination,
-      tmuxConfigPath: configPath
+      tmuxConfigPath: configPath,
+      tmuxSocketName: tmuxSocketName
     )
   }
 
@@ -213,7 +221,8 @@ public actor RemoteHandoffService {
     configPath: String,
     summaryPath: String,
     summary: String,
-    sessionID: String
+    sessionID: String,
+    tmuxSocketName: String = "feather"
   ) -> String {
     let parent = (destination as NSString).deletingLastPathComponent
     let handoffDirectory = (summaryPath as NSString).deletingLastPathComponent
@@ -232,7 +241,7 @@ public actor RemoteHandoffService {
         status=$?
         trap - EXIT HUP INT TERM
         if [ "$cleanup" -eq 1 ] && [ "$session_created" -eq 1 ]; then
-          tmux -L feather -f \(POSIXShell.quote(configPath)) kill-session -t "$session" >/dev/null 2>&1 || true
+          tmux -L \(POSIXShell.quote(tmuxSocketName)) -f \(POSIXShell.quote(configPath)) kill-session -t "$session" >/dev/null 2>&1 || true
         fi
         if [ "$cleanup" -eq 1 ] && [ "$destination_created" -eq 1 ]; then
           rm -rf -- "$destination"
@@ -247,7 +256,7 @@ public actor RemoteHandoffService {
       command -v tmux >/dev/null
       command -v base64 >/dev/null
       test ! -e "$destination"
-      ! tmux -L feather -f \(POSIXShell.quote(configPath)) has-session -t "$session" >/dev/null 2>&1
+      ! tmux -L \(POSIXShell.quote(tmuxSocketName)) -f \(POSIXShell.quote(configPath)) has-session -t "$session" >/dev/null 2>&1
       mkdir -p -- \(POSIXShell.quote(parent)) \(POSIXShell.quote(controlRoot)) \(POSIXShell.quote(handoffDirectory))
       printf %s \(POSIXShell.quote(Data(remoteTmuxConfiguration.utf8).base64EncodedString())) | base64 -d > \(POSIXShell.quote(configPath))
       destination_created=1
@@ -256,7 +265,7 @@ public actor RemoteHandoffService {
       test -z "$(git -C "$destination" status --porcelain=v1 --untracked-files=all)"
       printf %s \(POSIXShell.quote(Data(summary.utf8).base64EncodedString())) | base64 -d > "$summary"
       session_created=1
-      tmux -L feather -f \(POSIXShell.quote(configPath)) new-session -d -s "$session" -c "$destination" -- /bin/sh -lc \(POSIXShell.quote(terminalCommand))
+      tmux -L \(POSIXShell.quote(tmuxSocketName)) -f \(POSIXShell.quote(configPath)) new-session -d -s "$session" -c "$destination" -- /bin/sh -lc \(POSIXShell.quote(terminalCommand))
       cleanup=0
       trap - EXIT HUP INT TERM
       """

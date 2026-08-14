@@ -52,12 +52,32 @@ struct RemoteHandoffTests {
     #expect(script.contains("test ! -e \"$destination\""))
     #expect(script.contains("git clone --no-checkout --single-branch"))
     #expect(script.contains("checkout -B 'feature/test'"))
-    #expect(script.contains("tmux -L feather"))
+    #expect(script.contains("tmux -L 'feather'"))
     #expect(script.contains("kill-session -t \"$session\""))
     #expect(script.contains("rm -rf -- \"$destination\""))
     let ownershipCheck = try #require(script.range(of: "test ! -e \"$destination\""))
     let ownershipClaim = try #require(script.range(of: "destination_created=1"))
     #expect(ownershipCheck.lowerBound < ownershipClaim.lowerBound)
+    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", script])
+  }
+
+  @Test
+  func preparationScriptUsesAnIsolatedDevelopmentSocket() throws {
+    let script = RemoteHandoffService.preparationScript(
+      origin: "git@example.com:team/project.git",
+      branch: "feature/test",
+      commit: String(repeating: "a", count: 40),
+      destination: "/srv/feather/worktrees/project-alpha-12345678",
+      controlRoot: "/srv/feather/.feather-dev",
+      configPath: "/srv/feather/.feather-dev/tmux.conf",
+      summaryPath: "/srv/feather/.feather-dev/handoffs/session.txt",
+      summary: "Ready\n",
+      sessionID: "feather-session",
+      tmuxSocketName: "feather-dev"
+    )
+
+    #expect(script.contains("tmux -L 'feather-dev'"))
+    #expect(!script.contains("tmux -L 'feather'"))
     _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", script])
   }
 
