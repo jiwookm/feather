@@ -6,6 +6,13 @@ import Testing
 
 struct BoundedCommandRunnerTests {
   @Test
+  func elapsedCheckToleratesAnExitTimestampPublishedAfterTheClockSample() {
+    #expect(!BoundedCommandRunner.hasElapsed(1, since: 101, at: 100))
+    #expect(!BoundedCommandRunner.hasElapsed(2, since: 100, at: 101))
+    #expect(BoundedCommandRunner.hasElapsed(2, since: 100, at: 102))
+  }
+
+  @Test
   func keepsStandardOutputAndErrorSeparate() async throws {
     let output = try await BoundedCommandRunner().run(
       "/bin/zsh",

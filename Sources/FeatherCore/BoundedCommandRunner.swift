@@ -51,6 +51,15 @@ public struct BoundedCommandFailure: LocalizedError, Sendable {
 public struct BoundedCommandRunner: Sendable {
   public init() {}
 
+  static func hasElapsed(
+    _ duration: UInt64,
+    since start: UInt64,
+    at current: UInt64
+  ) -> Bool {
+    guard current >= start else { return false }
+    return current - start >= duration
+  }
+
   public func run(
     _ executable: String,
     arguments: [String] = [],
@@ -234,9 +243,17 @@ private final class CommandExecution: @unchecked Sendable {
     var idleAfterExitUptime: UInt64?
 
     while true {
-      let now = DispatchTime.now().uptimeNanoseconds
       let exitUptime = directProcessExitUptime()
-      if let exitUptime, now - exitUptime >= maximumPostExitDrainNanoseconds { return }
+      let now = DispatchTime.now().uptimeNanoseconds
+      if let exitUptime,
+        BoundedCommandRunner.hasElapsed(
+          maximumPostExitDrainNanoseconds,
+          since: exitUptime,
+          at: now
+        )
+      {
+        return
+      }
       let count = buffer.withUnsafeMutableBytes { bytes in
         Darwin.read(descriptor, bytes.baseAddress, bytes.count)
       }
@@ -250,7 +267,11 @@ private final class CommandExecution: @unchecked Sendable {
       guard errno == EAGAIN || errno == EWOULDBLOCK else { return }
       if exitUptime != nil {
         if let idleAfterExitUptime,
-          now - idleAfterExitUptime >= idlePostExitDrainNanoseconds
+          BoundedCommandRunner.hasElapsed(
+            idlePostExitDrainNanoseconds,
+            since: idleAfterExitUptime,
+            at: now
+          )
         {
           return
         }
