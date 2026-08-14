@@ -36,6 +36,14 @@ struct TerminalConfigurationTests {
     #expect(AgentKind(terminal: makeTerminal("Terminal 1")) == nil)
   }
 
+  @Test
+  func showsRuntimeBadgesOnlyForStatesThatNeedAttention() {
+    #expect(!TerminalRuntimeState.shell.showsNotificationBadge)
+    #expect(!TerminalRuntimeState.running.showsNotificationBadge)
+    #expect(TerminalRuntimeState.attention.showsNotificationBadge)
+    #expect(TerminalRuntimeState.exited.showsNotificationBadge)
+  }
+
   @Test @MainActor
   func managedConfigurationIsValidAndFixed() throws {
     let fileManager = FileManager.default

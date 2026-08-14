@@ -103,6 +103,7 @@ struct TerminalWorkspaceView: View {
 
   private func terminalTab(_ terminal: TerminalRecord) -> some View {
     let selected = terminal.id == model.selectedTerminalID
+    let runtimeState = model.runtimeState(for: terminal)
     return HStack(spacing: 8) {
       if let kind = AgentKind(terminal: terminal) {
         AgentIcon(
@@ -114,7 +115,9 @@ struct TerminalWorkspaceView: View {
         Image(systemName: TerminalLaunch.terminal.systemImage)
           .font(.system(size: 11, weight: .medium))
       }
-      TerminalRuntimeBadge(state: model.runtimeState(for: terminal), size: 7)
+      if runtimeState.showsNotificationBadge {
+        TerminalRuntimeBadge(state: runtimeState, size: 7)
+      }
       Text(terminal.title)
         .font(.feather(size: 14, weight: selected ? .medium : .regular))
         .lineLimit(1)

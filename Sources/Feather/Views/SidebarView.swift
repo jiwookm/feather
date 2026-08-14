@@ -155,6 +155,8 @@ struct SidebarView: View {
         .buttonStyle(.plain)
         .help(repository.path)
 
+        Spacer(minLength: 0)
+
         if !mainAgents.isEmpty {
           AgentSessionBadges(sessions: mainAgents)
         }
@@ -234,6 +236,7 @@ struct SidebarView: View {
         }
       }
     }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private func pendingWorktreeRow(_ pending: WorktreeCreation) -> some View {
