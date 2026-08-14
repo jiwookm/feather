@@ -164,7 +164,7 @@ struct TerminalWorkspaceView: View {
   }
 
   private var selectedRemoteBlockingState: RemoteWorkspaceRuntimeState? {
-    guard let workspace = model.selectedRemoteWorkspace else { return nil }
+    guard let workspace = model.selectedAuthoritativeRemoteWorkspace else { return nil }
     let state = model.remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting
     return state == .connected ? nil : state
   }
@@ -224,7 +224,8 @@ struct TerminalWorkspaceView: View {
   }
 
   private var noTerminalView: some View {
-    let remoteWorkspace = model.selectedRemoteWorkspace
+    let remoteWorkspace = model.selectedAuthoritativeRemoteWorkspace
+    let cleanupPending = model.selectedRemoteWorkspace?.returned != nil
     return emptyState(
       symbol: remoteWorkspace == nil ? "terminal" : "network",
       title: remoteWorkspace == nil ? "No terminals yet" : "Remote workspace ready",
@@ -240,10 +241,19 @@ struct TerminalWorkspaceView: View {
           terminalLaunchButton(.terminal)
         }
         if remoteWorkspace == nil, model.selectedRemoteProfile != nil {
-          Button("Run Remotely…") { model.requestRunSelectedWorkspaceRemotely() }
+          if cleanupPending {
+            Button("Clean Up Retained Remote Copy…") {
+              model.requestCleanupSelectedRemoteWorkspace()
+            }
             .buttonStyle(.borderless)
             .controlSize(.small)
-            .disabled(!model.canRunSelectedWorkspaceRemotely)
+            .disabled(!model.canCleanupSelectedRemoteWorkspace)
+          } else {
+            Button("Run Remotely…") { model.requestRunSelectedWorkspaceRemotely() }
+              .buttonStyle(.borderless)
+              .controlSize(.small)
+              .disabled(!model.canRunSelectedWorkspaceRemotely)
+          }
         }
       }
     }

@@ -632,6 +632,20 @@ private final class GitTransferFixture {
         esac
         exit "$status"
         """
+    case .mutateAfterReturnVerification(let path, let marker):
+      behavior = """
+        /bin/sh -c "$command"
+        status=$?
+        case "$command" in
+          *cleanup_return_verification*)
+            if [ "$status" -eq 0 ] && [ ! -e \(POSIXShell.quote(marker.path)) ]; then
+              printf '\\nremote changed during return\\n' >> \(POSIXShell.quote(path.path))
+              touch \(POSIXShell.quote(marker.path))
+            fi
+            ;;
+        esac
+        exit "$status"
+        """
     }
     let contents = """
       #!/bin/sh
@@ -647,6 +661,9 @@ private final class GitTransferFixture {
 
   func canonicalState(at path: String? = nil) throws -> CanonicalGitState {
     let path = path ?? checkout.path
+    let headCommit = try git(at: path, ["rev-parse", "HEAD"]).text.trimmingCharacters(
+      in: .whitespacesAndNewlines
+    )
     let diffPrefix = [
       "-c", "diff.mnemonicPrefix=false",
       "-c", "diff.noprefix=false",
@@ -669,6 +686,7 @@ private final class GitTransferFixture {
     ).data
     let root = URL(fileURLWithPath: path, isDirectory: true)
     let notes = try Data(contentsOf: root.appendingPathComponent("notes.txt"))
+    let nestedNotes = try Data(contentsOf: root.appendingPathComponent("notes/space name.txt"))
     let script = try Data(contentsOf: root.appendingPathComponent("script.sh"))
     let linkTarget = try FileManager.default.destinationOfSymbolicLink(
       atPath: root.appendingPathComponent("notes-link").path
@@ -678,11 +696,13 @@ private final class GitTransferFixture {
         atPath: root.appendingPathComponent("script.sh").path
       )[.posixPermissions] as? NSNumber
     return CanonicalGitState(
+      headCommit: headCommit,
       status: status,
       indexPatch: indexPatch,
       worktreePatch: worktreePatch,
       untrackedPaths: untrackedPaths,
       notes: notes,
+      nestedNotes: nestedNotes,
       script: script,
       linkTarget: linkTarget,
       scriptIsExecutable: (permissions?.intValue ?? 0) & 0o111 != 0
@@ -705,15 +725,450 @@ private enum FakeSSHMode {
   case mutateAfterStaging(path: URL, marker: URL)
   case truncateStagingPayload
   case failOnceAfterActivation(marker: URL)
+  case mutateAfterReturnVerification(path: URL, marker: URL)
 }
 
 private struct CanonicalGitState: Equatable {
+  let headCommit: String
   let status: Data
   let indexPatch: Data
   let worktreePatch: Data
   let untrackedPaths: Data
   let notes: Data
+  let nestedNotes: Data
   let script: Data
   let linkTarget: String
   let scriptIsExecutable: Bool
+}
+
+struct RemoteReturnTests {
+  @Test
+  func returnsCompleteGitStateThenCleansUpOnlyAfterActiveSessionConfirmation() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+
+    try context.createRichRemoteState()
+    try context.fixture.write("local cache survives\n", to: "cache/local-only.txt")
+    try FileManager.default.createDirectory(
+      at: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+        .appendingPathComponent("cache", isDirectory: true),
+      withIntermediateDirectories: true
+    )
+    try Data("remote cache is not transferred\n".utf8).write(
+      to: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+        .appendingPathComponent("cache/remote-only.txt"),
+      options: .atomic
+    )
+    let remoteState = try context.fixture.canonicalState(
+      at: context.workspace.remote.workingDirectory)
+    let remoteBackend = SSHTmuxBackend(
+      remote: context.workspace.remote,
+      sshExecutable: context.fakeSSH.path
+    )
+    try await remoteBackend.ensureSession("remote-agent", workingDirectory: "ignored")
+
+    let service = RemoteReturnService(sshExecutable: context.fakeSSH.path)
+    let preparation = try await service.prepareReturn(
+      workspace: context.workspace,
+      localWorktreePath: context.fixture.checkout.path,
+      recordedSessionIDs: ["remote-agent"]
+    )
+    #expect(preparation.preflight.activeSessionCount == 2)
+    #expect(preparation.preflight.state.unpublishedCommitCount == 1)
+    #expect(preparation.preflight.state.stagedPathCount == 1)
+    #expect(preparation.preflight.state.unstagedPathCount == 3)
+    #expect(preparation.preflight.state.untrackedFileCount == 4)
+
+    let returned = try await service.returnWorkspace(
+      context.workspace,
+      to: context.fixture.checkout.path,
+      preparation: preparation
+    )
+    #expect(try context.fixture.canonicalState() == remoteState)
+    #expect(
+      try String(
+        contentsOf: context.fixture.checkout.appendingPathComponent("cache/local-only.txt"),
+        encoding: .utf8
+      ) == "local cache survives\n"
+    )
+    #expect(
+      !FileManager.default.fileExists(
+        atPath: context.fixture.checkout.appendingPathComponent("cache/remote-only.txt").path
+      )
+    )
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+    #expect(try await remoteBackend.runtimeSnapshots().isEmpty)
+
+    let returnedWorkspace = context.workspace.recordingReturn(returned)
+    let unmanagedSibling = URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+      .deletingLastPathComponent()
+      .appendingPathComponent("unmanaged-sibling", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: unmanagedSibling,
+      withIntermediateDirectories: true
+    )
+    try Data("keep me\n".utf8).write(to: unmanagedSibling.appendingPathComponent("sentinel"))
+    try await remoteBackend.ensureSession("remote-agent", workingDirectory: "ignored")
+    let cleanup = try await service.cleanupPreflight(workspace: returnedWorkspace)
+    #expect(cleanup.activeSessionCount == 1)
+    await #expect(throws: RemoteHandoffError.activeRemoteSessions(1)) {
+      try await service.cleanupWorkspace(returnedWorkspace, endingActiveSessions: false)
+    }
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+
+    try await service.cleanupWorkspace(returnedWorkspace, endingActiveSessions: true)
+    #expect(
+      !FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+    #expect(
+      !FileManager.default.fileExists(atPath: context.workspace.ownership?.markerPath ?? "")
+    )
+    #expect(
+      try String(
+        contentsOf: unmanagedSibling.appendingPathComponent("sentinel"),
+        encoding: .utf8
+      ) == "keep me\n"
+    )
+  }
+
+  @Test
+  func refusesLocalDivergenceWithoutTouchingRemoteAuthority() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    try Data("remote divergence\n".utf8).write(
+      to: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+        .appendingPathComponent("tracked.txt")
+    )
+    let remoteBefore = try context.fixture.git(
+      at: context.workspace.remote.workingDirectory,
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]
+    ).data
+    try context.fixture.write("local divergence\n", to: "local-only.txt")
+
+    let service = RemoteReturnService(sshExecutable: context.fakeSSH.path)
+    await #expect(
+      throws: RemoteHandoffError.localReturnDiverged(context.fixture.checkout.path)
+    ) {
+      try await service.prepareReturn(
+        workspace: context.workspace,
+        localWorktreePath: context.fixture.checkout.path,
+        recordedSessionIDs: []
+      )
+    }
+
+    #expect(
+      try context.fixture.git(
+        at: context.workspace.remote.workingDirectory,
+        ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]
+      ).data == remoteBefore
+    )
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+  }
+
+  @Test
+  func anAdvancedOriginDoesNotChangeTheRecordedReturnBase() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    let publisher = context.fixture.root.appendingPathComponent("publisher", isDirectory: true)
+    let runner = CommandRunner()
+    try runner.run(
+      "/usr/bin/git",
+      arguments: ["clone", context.fixture.origin.path, publisher.path]
+    )
+    try Data("new published commit\n".utf8).write(
+      to: publisher.appendingPathComponent("published-later.txt")
+    )
+    try runner.run("/usr/bin/git", arguments: ["-C", publisher.path, "add", "."])
+    try runner.run(
+      "/usr/bin/git",
+      arguments: [
+        "-C", publisher.path,
+        "-c", "user.name=Feather Tests",
+        "-c", "user.email=feather-tests@example.com",
+        "commit", "-m", "advance origin",
+      ]
+    )
+    try runner.run("/usr/bin/git", arguments: ["-C", publisher.path, "push", "origin", "main"])
+    try context.fixture.git(["fetch", "origin"])
+
+    let preparation = try await RemoteReturnService(sshExecutable: context.fakeSSH.path)
+      .prepareReturn(
+        workspace: context.workspace,
+        localWorktreePath: context.fixture.checkout.path,
+        recordedSessionIDs: []
+      )
+
+    #expect(preparation.preflight.state.baseCommit == context.workspace.handoff?.state.baseCommit)
+    #expect(preparation.preflight.state.headCommit == context.workspace.handoff?.state.headCommit)
+  }
+
+  @Test
+  func rejectsSensitiveRemotePathsBeforeReturnPayloadTransfer() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    try Data("remote secret\n".utf8).write(
+      to: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+        .appendingPathComponent(".env.local")
+    )
+
+    await #expect(throws: RemoteHandoffError.sensitiveUntrackedPath(".env.local")) {
+      try await RemoteReturnService(sshExecutable: context.fakeSSH.path).prepareReturn(
+        workspace: context.workspace,
+        localWorktreePath: context.fixture.checkout.path,
+        recordedSessionIDs: []
+      )
+    }
+
+    #expect(
+      try String(
+        contentsOfFile: context.workspace.remote.workingDirectory + "/.env.local",
+        encoding: .utf8
+      ) == "remote secret\n"
+    )
+  }
+
+  @Test
+  func remoteMutationAfterVerificationRestoresLocalAndKeepsRemoteCheckout() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    try context.createRichRemoteState()
+    try context.fixture.write("local cache survives rollback\n", to: "cache/local-only.txt")
+    let localBefore = try context.fixture.git([
+      "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+    ]).data
+
+    let service = RemoteReturnService(sshExecutable: context.fakeSSH.path)
+    let preparation = try await service.prepareReturn(
+      workspace: context.workspace,
+      localWorktreePath: context.fixture.checkout.path,
+      recordedSessionIDs: []
+    )
+    let mutationMarker = context.fixture.root.appendingPathComponent("return-mutated")
+    try context.fixture.makeFakeSSH(
+      at: context.fakeSSH,
+      tmux: tmux,
+      mode: .mutateAfterReturnVerification(
+        path: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+          .appendingPathComponent("tracked.txt"),
+        marker: mutationMarker
+      )
+    )
+
+    await #expect(throws: RemoteHandoffError.remoteReturnChanged) {
+      try await service.returnWorkspace(
+        context.workspace,
+        to: context.fixture.checkout.path,
+        preparation: preparation
+      )
+    }
+    #expect(try context.fixture.canonicalStatus() == localBefore)
+    #expect(
+      try String(
+        contentsOf: context.fixture.checkout.appendingPathComponent("cache/local-only.txt"),
+        encoding: .utf8
+      ) == "local cache survives rollback\n"
+    )
+    #expect(FileManager.default.fileExists(atPath: mutationMarker.path))
+    #expect(
+      try String(
+        contentsOfFile: context.workspace.remote.workingDirectory + "/tracked.txt",
+        encoding: .utf8
+      ).contains("remote changed during return")
+    )
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+  }
+
+  @Test
+  func refusesReturnWhenRemoteWouldExposeIgnoredLocalData() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    try context.fixture.write("local cache must survive\n", to: "cache/local-only.txt")
+    try Data(".env\n".utf8).write(
+      to: URL(fileURLWithPath: context.workspace.remote.workingDirectory)
+        .appendingPathComponent(".gitignore")
+    )
+
+    let service = RemoteReturnService(sshExecutable: context.fakeSSH.path)
+    let preparation = try await service.prepareReturn(
+      workspace: context.workspace,
+      localWorktreePath: context.fixture.checkout.path,
+      recordedSessionIDs: []
+    )
+
+    await #expect(throws: RemoteHandoffError.localIgnoredPathConflict("cache/")) {
+      try await service.returnWorkspace(
+        context.workspace,
+        to: context.fixture.checkout.path,
+        preparation: preparation
+      )
+    }
+    #expect(
+      try String(
+        contentsOf: context.fixture.checkout.appendingPathComponent("cache/local-only.txt"),
+        encoding: .utf8
+      ) == "local cache must survive\n"
+    )
+    #expect(
+      try String(
+        contentsOf: context.fixture.checkout.appendingPathComponent(".gitignore"),
+        encoding: .utf8
+      ) == "cache/\n.env\n"
+    )
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+  }
+
+  @Test
+  func refusesCleanupWhenCentralOwnershipMarkerWasTamperedWith() async throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let context = try await RemoteReturnTestContext.make(tmux: tmux)
+    defer { context.remove() }
+    let service = RemoteReturnService(sshExecutable: context.fakeSSH.path)
+    let preparation = try await service.prepareReturn(
+      workspace: context.workspace,
+      localWorktreePath: context.fixture.checkout.path,
+      recordedSessionIDs: []
+    )
+    let returned = try await service.returnWorkspace(
+      context.workspace,
+      to: context.fixture.checkout.path,
+      preparation: preparation
+    )
+    let returnedWorkspace = context.workspace.recordingReturn(returned)
+    let marker = try #require(context.workspace.ownership?.markerPath)
+    try Data("someone-else".utf8).write(to: URL(fileURLWithPath: marker))
+
+    await #expect(throws: RemoteHandoffError.remoteCleanupRefused) {
+      try await service.cleanupWorkspace(returnedWorkspace, endingActiveSessions: true)
+    }
+    #expect(
+      FileManager.default.fileExists(atPath: context.workspace.remote.workingDirectory)
+    )
+  }
+}
+
+private final class RemoteReturnTestContext {
+  let fixture: GitTransferFixture
+  let fakeSSH: URL
+  let tmux: URL
+  let socketName: String
+  let workspace: RemoteWorkspaceRecord
+
+  private init(
+    fixture: GitTransferFixture,
+    fakeSSH: URL,
+    tmux: URL,
+    socketName: String,
+    workspace: RemoteWorkspaceRecord
+  ) {
+    self.fixture = fixture
+    self.fakeSSH = fakeSSH
+    self.tmux = tmux
+    self.socketName = socketName
+    self.workspace = workspace
+  }
+
+  static func make(tmux: URL) async throws -> RemoteReturnTestContext {
+    let fixture = try GitTransferFixture()
+    let fakeSSH = fixture.root.appendingPathComponent("ssh")
+    let remoteRoot = fixture.root.appendingPathComponent("remote", isDirectory: true)
+    let socketName = "feather-return-\(UUID().uuidString.lowercased())"
+    try FileManager.default.createDirectory(at: remoteRoot, withIntermediateDirectories: true)
+    try fixture.makeFakeSSH(at: fakeSSH, tmux: tmux)
+    let workspaceID = UUID()
+    let service = RemoteHandoffService(
+      sshExecutable: fakeSSH.path,
+      controlDirectoryName: ".feather-test",
+      tmuxSocketName: socketName
+    )
+    let preparation = try await service.prepareWorkspace(
+      repository: RepositoryRecord(
+        path: fixture.checkout.path,
+        displayName: "fixture",
+        remoteURL: fixture.origin.path
+      ),
+      worktreePath: fixture.checkout.path,
+      workspaceID: workspaceID,
+      target: SSHRemoteTarget(host: "fixture-host", rootPath: remoteRoot.path)
+    )
+    let workspace = RemoteWorkspaceRecord(
+      id: workspaceID,
+      repositoryID: UUID(),
+      worktreePath: fixture.checkout.path,
+      profileID: UUID(),
+      profileName: "Fixture Host",
+      remote: preparation.remote,
+      ownership: preparation.ownership,
+      handoff: preparation.manifest
+    )
+    return RemoteReturnTestContext(
+      fixture: fixture,
+      fakeSSH: fakeSSH,
+      tmux: tmux,
+      socketName: socketName,
+      workspace: workspace
+    )
+  }
+
+  func createRichRemoteState() throws {
+    let root = URL(fileURLWithPath: workspace.remote.workingDirectory, isDirectory: true)
+    try Data("committed remotely\n".utf8).write(to: root.appendingPathComponent("committed.txt"))
+    try fixture.git(at: root.path, ["add", "committed.txt"])
+    try fixture.git(
+      at: root.path,
+      [
+        "-c", "user.name=Feather Tests",
+        "-c", "user.email=feather-tests@example.com",
+        "commit", "-m", "remote commit",
+      ]
+    )
+    try Data("staged remotely\n".utf8).write(to: root.appendingPathComponent("staged.txt"))
+    try fixture.git(at: root.path, ["add", "staged.txt"])
+    try Data("staged plus remote working\n".utf8).write(
+      to: root.appendingPathComponent("staged.txt")
+    )
+    try Data("remote working\n".utf8).write(to: root.appendingPathComponent("tracked.txt"))
+    try Data([0, 7, 6, 5, 0, 4, 255]).write(to: root.appendingPathComponent("binary.dat"))
+    try Data("remote notes\n".utf8).write(to: root.appendingPathComponent("notes.txt"))
+    try FileManager.default.createDirectory(
+      at: root.appendingPathComponent("notes", isDirectory: true),
+      withIntermediateDirectories: true
+    )
+    try Data("remote nested notes\n".utf8).write(
+      to: root.appendingPathComponent("notes/space name.txt")
+    )
+    try Data("#!/bin/sh\nexit 0\n".utf8).write(to: root.appendingPathComponent("script.sh"))
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755],
+      ofItemAtPath: root.appendingPathComponent("script.sh").path
+    )
+    try FileManager.default.createSymbolicLink(
+      atPath: root.appendingPathComponent("notes-link").path,
+      withDestinationPath: "notes.txt"
+    )
+  }
+
+  func remove() {
+    _ = try? CommandRunner().run(
+      tmux.path,
+      arguments: ["-L", socketName, "kill-server"],
+      allowFailure: true
+    )
+    fixture.remove()
+  }
 }

@@ -24,6 +24,13 @@ enum RemoteHandoffError: LocalizedError, Equatable, Sendable {
   case unpublishedObjectsTooLarge(Int64)
   case transferTooLarge(Int)
   case cleanupUnverified(String)
+  case remoteReturnUnavailable
+  case localReturnDiverged(String)
+  case localIgnoredPathConflict(String)
+  case remoteReturnChanged
+  case returnRecoveryFailed(String)
+  case remoteCleanupRefused
+  case activeRemoteSessions(Int)
 
   var errorDescription: String? {
     switch self {
@@ -71,6 +78,20 @@ enum RemoteHandoffError: LocalizedError, Equatable, Sendable {
       "The remote handoff payload exceeds Feather's \(Self.byteDescription(Int64(limit))) safety limit."
     case .cleanupUnverified(let path):
       "Feather could not verify cleanup after the remote handoff stopped. The local worktree is still authoritative. Reconnect to the host and inspect the Feather-owned path before retrying: \(path)"
+    case .remoteReturnUnavailable:
+      "This workspace predates verified handoff metadata, so Feather cannot return or delete it automatically. Keep both copies and recover it manually."
+    case .localReturnDiverged(let path):
+      "The local worktree changed after remote handoff, so Feather refused to overwrite it. Keep both copies, commit or move the local changes, then compare them with the remote workspace before retrying: \(path)"
+    case .localIgnoredPathConflict(let path):
+      "The returned state would expose or overwrite ignored local data, so Feather kept both copies unchanged. Move or remove the local path before retrying: \(path)"
+    case .remoteReturnChanged:
+      "The remote checkpoint changed during return. Feather restored the original local checkpoint and kept the remote workspace authoritative. Retry after the remote work is idle."
+    case .returnRecoveryFailed(let path):
+      "Feather could not restore the original local checkpoint after return stopped. The remote workspace remains intact and authoritative. Do not edit the local copy; recover it from the saved remote workspace: \(path)"
+    case .remoteCleanupRefused:
+      "Feather could not prove that it owns this remote checkout. The record was kept and nothing was deleted."
+    case .activeRemoteSessions(let count):
+      "The remote checkout still has \(count) recorded terminal session\(count == 1 ? "" : "s"). Confirm ending them before deleting the Feather-owned checkout."
     }
   }
 
@@ -148,6 +169,8 @@ public enum SSHRemoteProfileValidator {
 }
 
 public enum RemoteWorkspaceOwnershipValidator {
+  static let maximumRecordedSessionCount = 10_000
+
   public static func validate(_ workspace: RemoteWorkspaceRecord) throws {
     let target = try SSHRemoteTargetValidator.validate(workspace.remote.target)
     let controlRoot = (workspace.remote.tmuxConfigPath as NSString).deletingLastPathComponent
@@ -168,29 +191,23 @@ public enum RemoteWorkspaceOwnershipValidator {
     else { throw RemoteHandoffError.invalidOwnershipMetadata }
 
     if let handoff = workspace.handoff {
-      let state = handoff.state
-      guard workspace.ownership != nil,
-        handoff.version == RemoteHandoffManifest.currentVersion,
-        handoff.artifactBytes >= 0,
-        !state.branch.isEmpty,
-        state.branch.utf8.count <= 1_024,
-        state.branch.unicodeScalars.allSatisfy({
-          !CharacterSet.controlCharacters.contains($0)
-        }),
-        isObjectID(state.baseCommit),
-        isObjectID(state.headCommit),
-        state.publishedCommit.map(isObjectID) ?? true,
-        isSHA256(state.statusSHA256),
-        isSHA256(state.indexPatchSHA256),
-        isSHA256(state.worktreePatchSHA256),
-        isSHA256(state.untrackedPathsSHA256),
-        isSHA256(state.untrackedEntriesSHA256),
-        handoff.bundleSHA256.map(isSHA256) ?? true,
-        state.stagedPathCount >= 0,
-        state.unstagedPathCount >= 0,
-        state.untrackedFileCount >= 0,
-        state.untrackedBytes >= 0,
-        state.unpublishedCommitCount >= 0
+      guard workspace.ownership != nil, isValidManifest(handoff) else {
+        throw RemoteHandoffError.invalidOwnershipMetadata
+      }
+    }
+    if let returned = workspace.returned {
+      let canonicalSessionIDs = Array(Set(returned.cleanupSessionIDs)).sorted()
+      guard let handoff = workspace.handoff, workspace.ownership != nil,
+        isValidManifest(returned.manifest),
+        returned.cleanupSessionIDs.count <= maximumRecordedSessionCount,
+        returned.cleanupSessionIDs == canonicalSessionIDs,
+        returned.cleanupSessionIDs.contains(RemoteHandoffService.workspaceSessionID(workspace.id)),
+        returned.manifest.state.branch == handoff.state.branch,
+        returned.manifest.state.baseCommit == handoff.state.baseCommit,
+        returned.manifest.state.publishedCommit == handoff.state.publishedCommit,
+        returned.cleanupSessionIDs.allSatisfy({
+          (try? SSHRemoteTargetValidator.validateSessionID($0)) != nil
+        })
       else { throw RemoteHandoffError.invalidOwnershipMetadata }
     }
 
@@ -226,6 +243,31 @@ public enum RemoteWorkspaceOwnershipValidator {
     value.unicodeScalars.allSatisfy {
       CharacterSet(charactersIn: "0123456789abcdef").contains($0)
     }
+  }
+
+  private static func isValidManifest(_ manifest: RemoteHandoffManifest) -> Bool {
+    let state = manifest.state
+    return manifest.version == RemoteHandoffManifest.currentVersion
+      && manifest.artifactBytes >= 0
+      && !state.branch.isEmpty
+      && state.branch.utf8.count <= 1_024
+      && state.branch.unicodeScalars.allSatisfy({
+        !CharacterSet.controlCharacters.contains($0)
+      })
+      && isObjectID(state.baseCommit)
+      && isObjectID(state.headCommit)
+      && (state.publishedCommit.map(isObjectID) ?? true)
+      && isSHA256(state.statusSHA256)
+      && isSHA256(state.indexPatchSHA256)
+      && isSHA256(state.worktreePatchSHA256)
+      && isSHA256(state.untrackedPathsSHA256)
+      && isSHA256(state.untrackedEntriesSHA256)
+      && (manifest.bundleSHA256.map(isSHA256) ?? true)
+      && state.stagedPathCount >= 0
+      && state.unstagedPathCount >= 0
+      && state.untrackedFileCount >= 0
+      && state.untrackedBytes >= 0
+      && state.unpublishedCommitCount >= 0
   }
 }
 
@@ -802,7 +844,7 @@ public actor RemoteHandoffService {
       """
   }
 
-  private static func manifestSHA256(_ manifest: RemoteHandoffManifest) -> String? {
+  static func manifestSHA256(_ manifest: RemoteHandoffManifest) -> String? {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
     guard let data = try? encoder.encode(manifest) else { return nil }
@@ -862,7 +904,7 @@ public actor RemoteHandoffService {
     return output.status == 0
   }
 
-  private static func noninteractiveSSHArguments(target: SSHRemoteTarget) -> [String] {
+  static func noninteractiveSSHArguments(target: SSHRemoteTarget) -> [String] {
     [
       "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ForwardAgent=no",
       "-p", String(target.port), "--",

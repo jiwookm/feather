@@ -389,6 +389,16 @@ public struct RemoteHandoffPreflight: Equatable, Sendable {
   }
 }
 
+public struct RemoteWorkspaceReturnRecord: Codable, Equatable, Sendable {
+  public let manifest: RemoteHandoffManifest
+  public let cleanupSessionIDs: [String]
+
+  public init(manifest: RemoteHandoffManifest, cleanupSessionIDs: [String]) {
+    self.manifest = manifest
+    self.cleanupSessionIDs = Array(Set(cleanupSessionIDs)).sorted()
+  }
+}
+
 public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable {
   public let id: UUID
   public let repositoryID: UUID
@@ -398,6 +408,7 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
   public let remote: SSHRemoteTerminal
   public let ownership: RemoteWorkspaceOwnership?
   public let handoff: RemoteHandoffManifest?
+  public let returned: RemoteWorkspaceReturnRecord?
 
   public init(
     id: UUID = UUID(),
@@ -407,7 +418,8 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
     profileName: String,
     remote: SSHRemoteTerminal,
     ownership: RemoteWorkspaceOwnership?,
-    handoff: RemoteHandoffManifest? = nil
+    handoff: RemoteHandoffManifest? = nil,
+    returned: RemoteWorkspaceReturnRecord? = nil
   ) {
     self.id = id
     self.repositoryID = repositoryID
@@ -417,10 +429,27 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
     self.remote = remote
     self.ownership = ownership
     self.handoff = handoff
+    self.returned = returned
   }
 
   public func matches(repositoryID: UUID, worktreePath: String) -> Bool {
     self.repositoryID == repositoryID && self.worktreePath == worktreePath
+  }
+
+  public var isRemoteAuthoritative: Bool { returned == nil }
+
+  public func recordingReturn(_ record: RemoteWorkspaceReturnRecord) -> RemoteWorkspaceRecord {
+    RemoteWorkspaceRecord(
+      id: id,
+      repositoryID: repositoryID,
+      worktreePath: worktreePath,
+      profileID: profileID,
+      profileName: profileName,
+      remote: remote,
+      ownership: ownership,
+      handoff: handoff,
+      returned: record
+    )
   }
 }
 
@@ -433,7 +462,7 @@ public enum WorkspaceExecutionRouter {
       repositoryID: terminal.repositoryID,
       worktreePath: terminal.worktreePath,
       in: workspaces
-    )
+    ).flatMap { $0.isRemoteAuthoritative ? $0 : nil }
   }
 
   public static func remoteWorkspace(
@@ -565,7 +594,7 @@ public protocol TerminalBackend: Actor {
 }
 
 public struct ApplicationSnapshot: Codable, Equatable, Sendable {
-  public static let currentVersion = 7
+  public static let currentVersion = 8
 
   public var version: Int
   public var repositories: [RepositoryRecord]

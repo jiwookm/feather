@@ -49,12 +49,16 @@ struct FeatherApp: App {
           NotificationCenter.default.post(name: .featherQuickOpenRequested, object: nil)
         }
         .keyboardShortcut("p", modifiers: .command)
-        .disabled(model.selectedWorktree == nil || model.selectedRemoteWorkspace != nil)
+        .disabled(
+          model.selectedWorktree == nil || model.selectedAuthoritativeRemoteWorkspace != nil
+        )
         Button("Search Repository…") {
           NotificationCenter.default.post(name: .featherRepositorySearchRequested, object: nil)
         }
         .keyboardShortcut("f", modifiers: [.command, .shift])
-        .disabled(model.selectedWorktree == nil || model.selectedRemoteWorkspace != nil)
+        .disabled(
+          model.selectedWorktree == nil || model.selectedAuthoritativeRemoteWorkspace != nil
+        )
       }
       CommandGroup(replacing: .saveItem) {
         Button("Save File") {
@@ -87,9 +91,18 @@ struct FeatherApp: App {
         if model.selectedRemoteWorkspace == nil {
           Button("Run Workspace Remotely…") { model.requestRunSelectedWorkspaceRemotely() }
             .disabled(!model.canRunSelectedWorkspaceRemotely)
-        } else {
+        } else if model.selectedAuthoritativeRemoteWorkspace != nil {
           Button("Reconnect Remote Workspace") { model.reconnectSelectedRemoteWorkspace() }
             .disabled(!model.canReconnectSelectedRemoteWorkspace)
+          Button("Return Workspace to This Mac…") {
+            model.requestReturnSelectedRemoteWorkspace()
+          }
+          .disabled(!model.canReturnSelectedRemoteWorkspace)
+        } else {
+          Button("Clean Up Remote Copy…") {
+            model.requestCleanupSelectedRemoteWorkspace()
+          }
+          .disabled(!model.canCleanupSelectedRemoteWorkspace)
         }
         Divider()
         Button("Refresh Worktrees") { model.refresh() }

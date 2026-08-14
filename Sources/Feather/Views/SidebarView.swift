@@ -26,6 +26,10 @@ struct SidebarView: View {
               repositorySection(repository)
             }
           }
+
+          if !orphanedRemoteWorkspaces.isEmpty {
+            orphanedRemoteSection
+          }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 12)
@@ -117,6 +121,91 @@ struct SidebarView: View {
     .padding(12)
   }
 
+  private var orphanedRemoteWorkspaces: [RemoteWorkspaceRecord] {
+    model.remoteWorkspaces.filter { workspace in
+      model.worktreesByRepository[workspace.repositoryID]?.contains(where: {
+        $0.path == workspace.worktreePath
+      }) != true
+    }
+  }
+
+  private var orphanedRemoteSection: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text("Remote Records")
+        .font(.feather(size: 11, weight: .semibold))
+        .foregroundStyle(palette.mutedText)
+        .padding(.horizontal, 8)
+
+      ForEach(orphanedRemoteWorkspaces) { workspace in
+        Button {
+          model.selectWorktree(
+            repositoryID: workspace.repositoryID,
+            path: workspace.worktreePath
+          )
+        } label: {
+          HStack(spacing: 8) {
+            Image(
+              systemName: orphanedRemoteSymbol(workspace)
+            )
+            .font(.system(size: 11, weight: .medium))
+            .frame(width: 14)
+
+            VStack(alignment: .leading, spacing: 2) {
+              Text(URL(fileURLWithPath: workspace.worktreePath).lastPathComponent)
+                .font(.feather(size: 13, weight: .medium))
+                .lineLimit(1)
+              Text(orphanedRemoteSubtitle(workspace))
+                .font(.feather(size: 10))
+                .foregroundStyle(palette.mutedText)
+                .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+          }
+          .foregroundStyle(palette.secondaryText)
+          .padding(.horizontal, 9)
+          .padding(.vertical, 6)
+          .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+          if workspace.isRemoteAuthoritative {
+            Button("Reconnect Remote Workspace") {
+              model.reconnectRemoteWorkspace(workspace)
+            }
+          } else {
+            Button("Clean Up Remote Copy…") {
+              model.requestCleanupRemoteWorkspace(workspace)
+            }
+          }
+        }
+        .help(workspace.remote.workingDirectory)
+      }
+    }
+  }
+
+  private func orphanedRemoteSymbol(_ workspace: RemoteWorkspaceRecord) -> String {
+    guard workspace.isRemoteAuthoritative else { return "externaldrive.badge.checkmark" }
+    return switch model.remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting {
+    case .connecting: "network"
+    case .connected: "externaldrive.badge.exclamationmark"
+    case .offline: "network.slash"
+    case .ownershipMismatch: "exclamationmark.shield"
+    }
+  }
+
+  private func orphanedRemoteSubtitle(_ workspace: RemoteWorkspaceRecord) -> String {
+    guard workspace.isRemoteAuthoritative else { return "Returned · remote cleanup pending" }
+    let state =
+      switch model.remoteWorkspaceRuntimeStates[workspace.id] ?? .connecting {
+      case .connecting: "Checking"
+      case .connected: "Remote"
+      case .offline: "Offline"
+      case .ownershipMismatch: "Ownership mismatch"
+      }
+    return "\(state) · local checkout not listed · \(workspace.profileName)"
+  }
+
   @ViewBuilder
   private func repositorySection(_ repository: RepositoryRecord) -> some View {
     let externalWorktrees = model.externalWorktrees(for: repository)
@@ -166,10 +255,17 @@ struct SidebarView: View {
         }
 
         if let mainRemoteWorkspace {
-          Image(systemName: "network")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(palette.secondaryText)
-            .help("Runs remotely on \(mainRemoteWorkspace.profileName)")
+          Image(
+            systemName: mainRemoteWorkspace.isRemoteAuthoritative
+              ? "network" : "externaldrive.badge.checkmark"
+          )
+          .font(.system(size: 11, weight: .medium))
+          .foregroundStyle(palette.secondaryText)
+          .help(
+            mainRemoteWorkspace.isRemoteAuthoritative
+              ? "Runs remotely on \(mainRemoteWorkspace.profileName)"
+              : "Returned locally; owned remote copy is retained for cleanup"
+          )
         }
 
         if hasChildren {
@@ -196,10 +292,19 @@ struct SidebarView: View {
               model.selectWorktree(repositoryID: repository.id, path: repository.path)
               model.requestRunSelectedWorkspaceRemotely()
             }
-          } else {
+          } else if mainRemoteWorkspace?.isRemoteAuthoritative == true {
             Button("Reconnect Remote Workspace") {
               model.selectWorktree(repositoryID: repository.id, path: repository.path)
               model.reconnectSelectedRemoteWorkspace()
+            }
+            Button("Return Workspace to This Mac…") {
+              model.selectWorktree(repositoryID: repository.id, path: repository.path)
+              model.requestReturnSelectedRemoteWorkspace()
+            }
+          } else {
+            Button("Clean Up Remote Copy…") {
+              model.selectWorktree(repositoryID: repository.id, path: repository.path)
+              model.requestCleanupSelectedRemoteWorkspace()
             }
           }
           Button("Move Project to Top") {
@@ -307,8 +412,9 @@ struct SidebarView: View {
     } label: {
       HStack(spacing: 8) {
         Image(
-          systemName: remoteWorkspace != nil
-            ? "network" : (isAvailable ? "shippingbox" : "arrow.triangle.branch")
+          systemName: remoteWorkspace.map {
+            $0.isRemoteAuthoritative ? "network" : "externaldrive.badge.checkmark"
+          } ?? (isAvailable ? "shippingbox" : "arrow.triangle.branch")
         )
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(selected ? palette.accent : palette.secondaryText)
@@ -326,7 +432,7 @@ struct SidebarView: View {
         }
 
         if let remoteWorkspace {
-          Text(remoteWorkspace.profileName)
+          Text(remoteWorkspace.isRemoteAuthoritative ? remoteWorkspace.profileName : "Returned")
             .font(.feather(size: 10, weight: .medium))
             .foregroundStyle(palette.mutedText)
             .lineLimit(1)
@@ -349,10 +455,19 @@ struct SidebarView: View {
       Button("Open in Finder") {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.path)])
       }
-      if remoteWorkspace != nil {
+      if let remoteWorkspace, remoteWorkspace.isRemoteAuthoritative {
         Button("Reconnect Remote Workspace") {
           model.selectWorktree(repositoryID: repository.id, path: worktree.path)
           model.reconnectSelectedRemoteWorkspace()
+        }
+        Button("Return Workspace to This Mac…") {
+          model.selectWorktree(repositoryID: repository.id, path: worktree.path)
+          model.requestReturnSelectedRemoteWorkspace()
+        }
+      } else if remoteWorkspace?.returned != nil {
+        Button("Clean Up Remote Copy…") {
+          model.selectWorktree(repositoryID: repository.id, path: worktree.path)
+          model.requestCleanupSelectedRemoteWorkspace()
         }
       } else if isAvailable {
         Button("Reuse Worktree") {

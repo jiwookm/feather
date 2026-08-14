@@ -88,13 +88,15 @@ struct RootView: View {
         model.toggleInspector()
       }
       .onReceive(NotificationCenter.default.publisher(for: .featherQuickOpenRequested)) { _ in
-        guard model.selectedWorktree != nil, model.selectedRemoteWorkspace == nil else { return }
+        guard model.selectedWorktree != nil, model.selectedAuthoritativeRemoteWorkspace == nil
+        else { return }
         repositorySearchVisible = false
         quickOpenVisible.toggle()
       }
       .onReceive(NotificationCenter.default.publisher(for: .featherRepositorySearchRequested)) {
         _ in
-        guard model.selectedWorktree != nil, model.selectedRemoteWorkspace == nil else { return }
+        guard model.selectedWorktree != nil, model.selectedAuthoritativeRemoteWorkspace == nil
+        else { return }
         quickOpenVisible = false
         repositorySearchVisible.toggle()
       }
@@ -159,7 +161,7 @@ struct RootView: View {
         InspectorView(
           repository: model.selectedRepository,
           worktree: model.selectedWorktree,
-          remoteWorkspace: model.selectedRemoteWorkspace,
+          remoteWorkspace: model.selectedAuthoritativeRemoteWorkspace,
           isFullScreen: isFullScreen,
           selectedDocumentPath: document.request?.path,
           onOpenFile: { path in
@@ -179,7 +181,10 @@ struct RootView: View {
             )
           }
         )
-        .id(model.selectedWorktreePath)
+        .id(
+          "\(model.selectedWorktreePath ?? "")-"
+            + "\(model.selectedAuthoritativeRemoteWorkspace?.id.uuidString ?? "local")"
+        )
         .frame(width: 288)
         .allowsHitTesting(!model.isBusy)
       }
@@ -283,6 +288,37 @@ struct RootView: View {
         },
         secondaryButton: .cancel()
       )
+    case .returnRemoteWorkspace(
+      let repository,
+      let worktree,
+      let workspace,
+      let preparation
+    ):
+      Alert(
+        title: Text("Return \(worktree.displayName) to this Mac?"),
+        message: Text(
+          remoteReturnMessage(preparation.preflight, profileName: workspace.profileName)),
+        primaryButton: .default(Text("Verify and Return")) {
+          model.confirmReturnRemoteWorkspace(
+            repository: repository,
+            worktree: worktree,
+            workspace: workspace,
+            preparation: preparation
+          )
+        },
+        secondaryButton: .cancel()
+      )
+    case .cleanupRemoteWorkspace(let workspace, let preflight):
+      Alert(
+        title: Text("Delete the remote copy?"),
+        message: Text(remoteCleanupMessage(preflight, workspace: workspace)),
+        primaryButton: .destructive(
+          Text(preflight.activeSessionCount == 0 ? "Delete Remote Copy" : "End Sessions and Delete")
+        ) {
+          model.confirmCleanupRemoteWorkspace(workspace, preflight: preflight)
+        },
+        secondaryButton: .cancel()
+      )
     }
   }
 
@@ -323,5 +359,45 @@ struct RootView: View {
       + "in a bounded \(byteCount) payload. Ignored files are not copied, and likely credential "
       + "paths block handoff. The local checkout stays authoritative until the remote Git state, "
       + "hashes, ownership, and tmux workspace are verified."
+  }
+
+  private func remoteReturnMessage(
+    _ preflight: RemoteReturnPreflight,
+    profileName: String
+  ) -> String {
+    let state = preflight.state
+    let byteCount = ByteCountFormatter.string(
+      fromByteCount: preflight.transferBytes,
+      countStyle: .file
+    )
+    let sessions = preflight.activeSessionCount
+    let sessionMessage =
+      sessions == 0
+      ? "No recorded remote sessions are currently running."
+      : "The \(sessions) recorded remote session\(sessions == 1 ? "" : "s") will remain running "
+        + "until the local result passes isolated verification."
+    return
+      "Feather verified the unchanged local handoff checkpoint and captured \(byteCount) from "
+      + "\(profileName): \(state.unpublishedCommitCount) unpublished commit\(state.unpublishedCommitCount == 1 ? "" : "s"), "
+      + "\(state.stagedPathCount) staged path\(state.stagedPathCount == 1 ? "" : "s"), "
+      + "\(state.unstagedPathCount) unstaged path\(state.unstagedPathCount == 1 ? "" : "s"), and "
+      + "\(state.untrackedFileCount) non-ignored untracked file\(state.untrackedFileCount == 1 ? "" : "s"). "
+      + "\(sessionMessage) The owned remote checkout will be "
+      + "kept afterward for explicit cleanup."
+  }
+
+  private func remoteCleanupMessage(
+    _ preflight: RemoteCleanupPreflight,
+    workspace: RemoteWorkspaceRecord
+  ) -> String {
+    let sessions = preflight.activeSessionCount
+    let sessionMessage =
+      sessions == 0
+      ? "No recorded terminal sessions are running."
+      : "\(sessions) recorded terminal session\(sessions == 1 ? " is" : "s are") still running and will be ended."
+    return
+      "\(sessionMessage) Feather will re-verify its central ownership marker, checkout marker, "
+      + "and original handoff manifest before deleting only the recorded checkout on "
+      + "\(workspace.profileName). This cannot be undone."
   }
 }
