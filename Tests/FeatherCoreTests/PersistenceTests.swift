@@ -156,6 +156,26 @@ struct PersistenceTests {
       target: SSHRemoteTarget(host: "build-host", rootPath: "/srv/feather")
     )
     let repositoryID = UUID()
+    let handoff = RemoteHandoffManifest(
+      state: RemoteHandoffStateFingerprint(
+        branch: "feature/transactional-handoff",
+        baseCommit: String(repeating: "a", count: 40),
+        headCommit: String(repeating: "b", count: 40),
+        publishedCommit: String(repeating: "a", count: 40),
+        statusSHA256: String(repeating: "1", count: 64),
+        indexPatchSHA256: String(repeating: "2", count: 64),
+        worktreePatchSHA256: String(repeating: "3", count: 64),
+        untrackedPathsSHA256: String(repeating: "4", count: 64),
+        untrackedEntriesSHA256: String(repeating: "5", count: 64),
+        stagedPathCount: 2,
+        unstagedPathCount: 1,
+        untrackedFileCount: 3,
+        untrackedBytes: 512,
+        unpublishedCommitCount: 1
+      ),
+      bundleSHA256: String(repeating: "6", count: 64),
+      artifactBytes: 1_024
+    )
     let workspace = RemoteWorkspaceRecord(
       repositoryID: repositoryID,
       worktreePath: "/tmp/project",
@@ -169,7 +189,8 @@ struct PersistenceTests {
       ownership: RemoteWorkspaceOwnership(
         token: "owned-token",
         markerPath: "/srv/feather/.feather/workspaces/project.owner"
-      )
+      ),
+      handoff: handoff
     )
     let snapshot = ApplicationSnapshot(
       remoteProfiles: [profile],
@@ -183,6 +204,34 @@ struct PersistenceTests {
     #expect(loaded.remoteProfiles == [profile])
     #expect(loaded.selectedRemoteProfileID == profile.id)
     #expect(loaded.remoteWorkspaces == [workspace])
+    #expect(loaded.remoteWorkspaces.first?.handoff == handoff)
+  }
+
+  @Test
+  func loadsVersionSixRemoteWorkspaceWithoutHandoffManifest() throws {
+    let workspace = RemoteWorkspaceRecord(
+      repositoryID: UUID(),
+      worktreePath: "/tmp/project",
+      profileID: nil,
+      profileName: "Legacy Host",
+      remote: SSHRemoteTerminal(
+        target: SSHRemoteTarget(host: "build-host", rootPath: "/srv/feather"),
+        workingDirectory: "/srv/feather/worktrees/project",
+        tmuxConfigPath: "/srv/feather/.feather/tmux.conf"
+      ),
+      ownership: RemoteWorkspaceOwnership(
+        token: "legacy-token",
+        markerPath: "/srv/feather/.feather/workspaces/project.owner"
+      )
+    )
+    let legacy = ApplicationSnapshot(version: 6, remoteWorkspaces: [workspace])
+    let data = try JSONEncoder().encode(legacy)
+
+    #expect(!String(decoding: data, as: UTF8.self).contains("\"handoff\""))
+    let loaded = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
+    #expect(loaded.version == 6)
+    #expect(loaded.remoteWorkspaces.first?.handoff == nil)
+    #expect(ApplicationSnapshot.currentVersion == 7)
   }
 
   @Test

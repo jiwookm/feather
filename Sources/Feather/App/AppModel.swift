@@ -48,7 +48,12 @@ final class AppModel: ObservableObject {
     case closePane(TerminalRecord, TerminalPaneState)
     case removeWorktree(RepositoryRecord, GitWorktree)
     case returnWorktree(RepositoryRecord, GitWorktree)
-    case runWorkspaceRemotely(RepositoryRecord, GitWorktree, SSHRemoteProfile)
+    case runWorkspaceRemotely(
+      RepositoryRecord,
+      GitWorktree,
+      SSHRemoteProfile,
+      RemoteHandoffPreflight
+    )
     case message(String, String)
 
     var id: String {
@@ -58,7 +63,7 @@ final class AppModel: ObservableObject {
       case .closePane(_, let pane): "pane-\(pane.id)"
       case .removeWorktree(_, let worktree): "worktree-\(worktree.path)"
       case .returnWorktree(_, let worktree): "return-\(worktree.path)"
-      case .runWorkspaceRemotely(let repository, let worktree, _):
+      case .runWorkspaceRemotely(let repository, let worktree, _, _):
         "remote-workspace-\(repository.id)-\(worktree.path)"
       case .message(let title, let message): "message-\(title)-\(message)"
       }
@@ -904,7 +909,7 @@ final class AppModel: ObservableObject {
         try await remoteHandoffService.checkTarget(target)
         presentedAlert = .message(
           "Remote Target Ready",
-          "SSH connected successfully, and both Git and tmux are installed."
+          "SSH connected successfully, and Git, tmux, tar, base64, and SHA-256 tooling are installed."
         )
       } catch {
         show(error)
@@ -944,13 +949,29 @@ final class AppModel: ObservableObject {
       )
       return
     }
-    presentedAlert = .runWorkspaceRemotely(repository, worktree, profile)
+    isBusy = true
+    Task {
+      defer { isBusy = false }
+      do {
+        let preflight = try await remoteHandoffService.preflightWorkspace(
+          worktreePath: worktree.path
+        )
+        guard remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil,
+          terminals(repositoryID: repository.id, worktreePath: worktree.path).isEmpty,
+          !hasOpenWorkspaceDocuments
+        else { return }
+        presentedAlert = .runWorkspaceRemotely(repository, worktree, profile, preflight)
+      } catch {
+        show(error)
+      }
+    }
   }
 
   func confirmRunWorkspaceRemotely(
     repository: RepositoryRecord,
     worktree: GitWorktree,
-    profile: SSHRemoteProfile
+    profile: SSHRemoteProfile,
+    preflight: RemoteHandoffPreflight
   ) {
     guard !isBusy,
       remoteWorkspace(repositoryID: repository.id, worktreePath: worktree.path) == nil,
@@ -967,7 +988,8 @@ final class AppModel: ObservableObject {
           repository: repository,
           worktreePath: worktree.path,
           workspaceID: workspaceID,
-          target: profile.target
+          target: profile.target,
+          expectedPreflight: preflight
         )
         let workspace = RemoteWorkspaceRecord(
           id: workspaceID,
@@ -976,7 +998,8 @@ final class AppModel: ObservableObject {
           profileID: profile.id,
           profileName: profile.name,
           remote: preparation.remote,
-          ownership: preparation.ownership
+          ownership: preparation.ownership,
+          handoff: preparation.manifest
         )
         remoteWorkspaces.append(workspace)
         remoteWorkspaceRuntimeStates[workspace.id] = .connected

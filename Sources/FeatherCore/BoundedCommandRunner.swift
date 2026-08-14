@@ -56,6 +56,7 @@ public struct BoundedCommandRunner: Sendable {
     arguments: [String] = [],
     currentDirectory: URL? = nil,
     environment: [String: String] = [:],
+    standardInput: Data? = nil,
     maximumOutputBytes: Int = 8 * 1_024 * 1_024,
     timeout: TimeInterval = 15
   ) async throws -> BoundedCommandOutput {
@@ -64,13 +65,20 @@ public struct BoundedCommandRunner: Sendable {
       arguments: arguments,
       currentDirectory: currentDirectory,
       environment: environment,
+      standardInput: standardInput,
       maximumOutputBytes: maximumOutputBytes,
       timeout: timeout
     )
     return try await withTaskCancellationHandler {
-      try await Task.detached(priority: .utility) {
-        try execution.execute()
-      }.value
+      try await withCheckedThrowingContinuation { continuation in
+        Thread.detachNewThread {
+          do {
+            continuation.resume(returning: try execution.execute())
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
     } onCancel: {
       execution.cancel()
     }
@@ -88,6 +96,7 @@ private final class CommandExecution: @unchecked Sendable {
   private let arguments: [String]
   private let currentDirectory: URL?
   private let environment: [String: String]
+  private let standardInput: Data?
   private let maximumOutputBytes: Int
   private let timeout: TimeInterval
   private let lock = NSLock()
@@ -95,12 +104,20 @@ private final class CommandExecution: @unchecked Sendable {
   private var stdout = Data()
   private var stderr = Data()
   private var stopReason: StopReason?
+  private var processExitUptime: UInt64?
+
+  /// A direct child owns its output through exit. A daemonized descendant may
+  /// inherit the same descriptors indefinitely, so only give already-buffered
+  /// bytes a short, deterministic window to drain after that exit.
+  private let maximumPostExitDrainNanoseconds: UInt64 = 2_000_000_000
+  private let idlePostExitDrainNanoseconds: UInt64 = 100_000_000
 
   init(
     executable: String,
     arguments: [String],
     currentDirectory: URL?,
     environment: [String: String],
+    standardInput: Data?,
     maximumOutputBytes: Int,
     timeout: TimeInterval
   ) {
@@ -108,6 +125,7 @@ private final class CommandExecution: @unchecked Sendable {
     self.arguments = arguments
     self.currentDirectory = currentDirectory
     self.environment = environment
+    self.standardInput = standardInput
     self.maximumOutputBytes = max(1, maximumOutputBytes)
     self.timeout = max(0.1, timeout)
   }
@@ -116,11 +134,13 @@ private final class CommandExecution: @unchecked Sendable {
     let process = Process()
     let outputPipe = Pipe()
     let errorPipe = Pipe()
+    let inputPipe = standardInput.map { _ in Pipe() }
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     process.currentDirectoryURL = currentDirectory
     process.standardOutput = outputPipe
     process.standardError = errorPipe
+    process.standardInput = inputPipe ?? FileHandle.nullDevice
     process.environment = ProcessInfo.processInfo.environment.merging(environment) {
       _, replacement in replacement
     }
@@ -131,16 +151,37 @@ private final class CommandExecution: @unchecked Sendable {
     lock.unlock()
     if cancelledBeforeStart { throw CancellationError() }
 
-    try process.run()
+    do {
+      try process.run()
+    } catch {
+      lock.lock()
+      self.process = nil
+      processExitUptime = DispatchTime.now().uptimeNanoseconds
+      lock.unlock()
+      throw error
+    }
+
+    try? outputPipe.fileHandleForWriting.close()
+    try? errorPipe.fileHandleForWriting.close()
+
+    let writers = DispatchGroup()
+    if let standardInput, let inputPipe {
+      try? inputPipe.fileHandleForReading.close()
+      writers.enter()
+      Thread.detachNewThread { [self] in
+        write(standardInput, to: inputPipe.fileHandleForWriting)
+        writers.leave()
+      }
+    }
 
     let readers = DispatchGroup()
     readers.enter()
-    DispatchQueue.global(qos: .utility).async { [self] in
+    Thread.detachNewThread { [self] in
       read(outputPipe.fileHandleForReading, isStandardError: false)
       readers.leave()
     }
     readers.enter()
-    DispatchQueue.global(qos: .utility).async { [self] in
+    Thread.detachNewThread { [self] in
       read(errorPipe.fileHandleForReading, isStandardError: true)
       readers.leave()
     }
@@ -154,8 +195,14 @@ private final class CommandExecution: @unchecked Sendable {
     )
 
     process.waitUntilExit()
-    readers.wait()
     timeoutWork.cancel()
+    lock.lock()
+    processExitUptime = DispatchTime.now().uptimeNanoseconds
+    lock.unlock()
+    readers.wait()
+    writers.wait()
+    try? outputPipe.fileHandleForReading.close()
+    try? errorPipe.fileHandleForReading.close()
 
     lock.lock()
     self.process = nil
@@ -180,11 +227,78 @@ private final class CommandExecution: @unchecked Sendable {
   }
 
   private func read(_ handle: FileHandle, isStandardError: Bool) {
+    let descriptor = handle.fileDescriptor
+    let flags = fcntl(descriptor, F_GETFL)
+    if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+    var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+    var idleAfterExitUptime: UInt64?
+
     while true {
-      let data = (try? handle.read(upToCount: 64 * 1_024)) ?? Data()
-      guard !data.isEmpty else { return }
-      append(data, isStandardError: isStandardError)
+      let now = DispatchTime.now().uptimeNanoseconds
+      let exitUptime = directProcessExitUptime()
+      if let exitUptime, now - exitUptime >= maximumPostExitDrainNanoseconds { return }
+      let count = buffer.withUnsafeMutableBytes { bytes in
+        Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+      }
+      if count > 0 {
+        idleAfterExitUptime = nil
+        append(Data(buffer.prefix(count)), isStandardError: isStandardError)
+        continue
+      }
+      if count == 0 { return }
+      if errno == EINTR { continue }
+      guard errno == EAGAIN || errno == EWOULDBLOCK else { return }
+      if exitUptime != nil {
+        if let idleAfterExitUptime,
+          now - idleAfterExitUptime >= idlePostExitDrainNanoseconds
+        {
+          return
+        }
+        idleAfterExitUptime = idleAfterExitUptime ?? now
+      }
+      usleep(10_000)
     }
+  }
+
+  private func write(_ data: Data, to handle: FileHandle) {
+    defer { try? handle.close() }
+    let descriptor = handle.fileDescriptor
+    let flags = fcntl(descriptor, F_GETFL)
+    if flags >= 0 { _ = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) }
+    _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
+
+    data.withUnsafeBytes { bytes in
+      guard let baseAddress = bytes.baseAddress else { return }
+      var offset = 0
+      while offset < bytes.count {
+        if shouldStopWriting() { return }
+        let count = Darwin.write(descriptor, baseAddress.advanced(by: offset), bytes.count - offset)
+        if count > 0 {
+          offset += count
+          continue
+        }
+        if count == -1, errno == EINTR { continue }
+        if count == -1, errno == EAGAIN || errno == EWOULDBLOCK {
+          usleep(10_000)
+          continue
+        }
+        return
+      }
+    }
+  }
+
+  private func directProcessExitUptime() -> UInt64? {
+    lock.lock()
+    let exitUptime = processExitUptime
+    lock.unlock()
+    return exitUptime
+  }
+
+  private func shouldStopWriting() -> Bool {
+    lock.lock()
+    let stopped = stopReason != nil || processExitUptime != nil
+    lock.unlock()
+    return stopped
   }
 
   private func append(_ data: Data, isStandardError: Bool) {

@@ -51,46 +51,81 @@ struct RemoteHandoffTests {
   }
 
   @Test
-  func quotesShellValuesAndBuildsOwnedPreparationScript() throws {
+  func quotesShellValuesAndBuildsTransactionalHandoffScripts() throws {
     #expect(POSIXShell.quote("it's safe") == "'it'\\''s safe'")
 
-    let script = RemoteHandoffService.preparationScript(
+    let state = fixtureState()
+    let stage = RemoteHandoffService.stagingScript(
       origin: "git@example.com:team/project.git",
-      branch: "feature/test",
-      commit: String(repeating: "a", count: 40),
+      state: state,
+      manifestSHA256: String(repeating: "1", count: 64),
+      archiveSHA256: String(repeating: "2", count: 64),
+      bundleSHA256: String(repeating: "3", count: 64),
+      transferDirectory: "/srv/feather/.feather/transfers/workspace.payload",
+      stagingDirectory: "/srv/feather/.feather/transfers/workspace.partial",
+      ownershipToken: "owned-token"
+    )
+    let finalize = RemoteHandoffService.finalizationScript(
       destination: "/srv/feather/worktrees/project-alpha-12345678",
       controlRoot: "/srv/feather/.feather",
+      configPath: "/srv/feather/.feather/tmux.conf",
+      markerPath: "/srv/feather/.feather/workspaces/workspace.owner",
+      stagingDirectory: "/srv/feather/.feather/transfers/workspace.partial",
+      ownershipToken: "owned-token",
+      workspaceSessionID: "feather-workspace-1234"
+    )
+    let cleanup = RemoteHandoffService.cleanupTransferScript(
+      transferDirectory: "/srv/feather/.feather/transfers/workspace.payload",
+      stagingDirectory: "/srv/feather/.feather/transfers/workspace.partial",
+      ownershipToken: "owned-token"
+    )
+    let rollback = RemoteHandoffService.rollbackScript(
+      destination: "/srv/feather/worktrees/project-alpha-12345678",
       configPath: "/srv/feather/.feather/tmux.conf",
       markerPath: "/srv/feather/.feather/workspaces/workspace.owner",
       ownershipToken: "owned-token",
       workspaceSessionID: "feather-workspace-1234"
     )
 
-    #expect(script.contains("test ! -e \"$destination\""))
-    #expect(script.contains("git clone --no-checkout --single-branch"))
-    #expect(script.contains("checkout -B 'feature/test'"))
-    #expect(script.contains("tmux -L 'feather'"))
-    #expect(script.contains("kill-session -t \"$session\""))
-    #expect(script.contains("rm -rf -- \"$destination\""))
-    #expect(script.contains("printf %s 'owned-token' > \"$marker\""))
-    #expect(script.contains("printf %s 'owned-token' > \"$checkout_marker\""))
-    #expect(script.contains("new-session -d -s \"$session\""))
-    let ownershipCheck = try #require(script.range(of: "test ! -e \"$destination\""))
-    let ownershipClaim = try #require(script.range(of: "destination_created=1"))
-    #expect(ownershipCheck.lowerBound < ownershipClaim.lowerBound)
-    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", script])
+    #expect(stage.contains("cat > \"$transfer/payload.tar\""))
+    #expect(stage.contains("git clone --no-checkout"))
+    #expect(stage.contains("bundle unbundle"))
+    #expect(stage.contains("apply --binary --index"))
+    #expect(stage.contains("remote-status.snapshot"))
+    #expect(stage.contains("rm -rf -- \"$transfer\" \"$staging\""))
+    #expect(stage.contains("$transfer/feather-owner"))
+    #expect(stage.contains("printf 'staged:%s"))
+    #expect(!stage.contains("new-session -d"))
+    #expect(!stage.contains("checkout_marker="))
+    #expect(finalize.contains("mv -- \"$staging\" \"$destination\""))
+    #expect(finalize.contains("printf %s 'owned-token' > \"$marker\""))
+    #expect(finalize.contains("printf %s 'owned-token' > \"$checkout_marker\""))
+    #expect(finalize.contains("new-session -d -s \"$session\""))
+    #expect(finalize.contains("printf 'active:%s"))
+    #expect(cleanup.contains("$transfer/feather-owner"))
+    #expect(cleanup.contains("feather-handoff/staged"))
+    #expect(rollback.contains("owns_destination=0"))
+    #expect(rollback.contains("owns_marker=0"))
+    #expect(rollback.contains("feather-handoff/staged"))
+    let verification = try #require(stage.range(of: "remote-status.snapshot"))
+    let stagedClaim = try #require(
+      stage.range(of: "feather-handoff/staged", options: .backwards)
+    )
+    #expect(verification.lowerBound < stagedClaim.lowerBound)
+    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", stage])
+    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", finalize])
+    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", cleanup])
+    _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", rollback])
   }
 
   @Test
   func preparationScriptUsesAnIsolatedDevelopmentSocket() throws {
-    let script = RemoteHandoffService.preparationScript(
-      origin: "git@example.com:team/project.git",
-      branch: "feature/test",
-      commit: String(repeating: "a", count: 40),
+    let script = RemoteHandoffService.finalizationScript(
       destination: "/srv/feather/worktrees/project-alpha-12345678",
       controlRoot: "/srv/feather/.feather-dev",
       configPath: "/srv/feather/.feather-dev/tmux.conf",
       markerPath: "/srv/feather/.feather-dev/workspaces/workspace.owner",
+      stagingDirectory: "/srv/feather/.feather-dev/transfers/workspace.partial",
       ownershipToken: "owned-token",
       workspaceSessionID: "feather-workspace-1234",
       tmuxSocketName: "feather-dev"
@@ -99,6 +134,112 @@ struct RemoteHandoffTests {
     #expect(script.contains("tmux -L 'feather-dev'"))
     #expect(!script.contains("tmux -L 'feather'"))
     _ = try CommandRunner().run("/bin/sh", arguments: ["-n", "-c", script])
+  }
+
+  @Test
+  func transferCleanupOnlyRemovesTokenOwnedPaths() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "feather-cleanup-ownership-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let runner = CommandRunner()
+    let unownedTransfer = root.appendingPathComponent("unowned.payload", isDirectory: true)
+    let unownedStaging = root.appendingPathComponent("unowned.partial", isDirectory: true)
+    try FileManager.default.createDirectory(at: unownedTransfer, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: unownedStaging, withIntermediateDirectories: true)
+    try Data("keep".utf8).write(to: unownedTransfer.appendingPathComponent("keep"))
+    let unownedScript = RemoteHandoffService.cleanupTransferScript(
+      transferDirectory: unownedTransfer.path,
+      stagingDirectory: unownedStaging.path,
+      ownershipToken: "owned-token"
+    )
+
+    let unowned = try runner.run(
+      "/bin/sh",
+      arguments: ["-c", unownedScript],
+      allowFailure: true
+    )
+    #expect(unowned.status != 0)
+    #expect(FileManager.default.fileExists(atPath: unownedTransfer.path))
+    #expect(FileManager.default.fileExists(atPath: unownedStaging.path))
+
+    let ownedTransfer = root.appendingPathComponent("owned.payload", isDirectory: true)
+    let ownedStaging = root.appendingPathComponent("owned.partial", isDirectory: true)
+    try FileManager.default.createDirectory(at: ownedTransfer, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: ownedStaging, withIntermediateDirectories: true)
+    try Data("owned-token".utf8).write(
+      to: ownedTransfer.appendingPathComponent("feather-owner")
+    )
+    let ownedScript = RemoteHandoffService.cleanupTransferScript(
+      transferDirectory: ownedTransfer.path,
+      stagingDirectory: ownedStaging.path,
+      ownershipToken: "owned-token"
+    )
+
+    let owned = try runner.run("/bin/sh", arguments: ["-c", ownedScript])
+    #expect(owned.status == 0)
+    #expect(!FileManager.default.fileExists(atPath: ownedTransfer.path))
+    #expect(!FileManager.default.fileExists(atPath: ownedStaging.path))
+  }
+
+  @Test
+  func finalizationNeverRemovesAPreexistingDestination() throws {
+    guard let tmux = TmuxEnvironment.locateExecutable() else { return }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "feather-finalize-collision-\(UUID().uuidString)",
+      isDirectory: true
+    )
+    defer { try? FileManager.default.removeItem(at: root) }
+    let staging = root.appendingPathComponent("workspace.partial", isDirectory: true)
+    let destination = root.appendingPathComponent("workspace", isDirectory: true)
+    let handoff = staging.appendingPathComponent(".git/feather-handoff", isDirectory: true)
+    try FileManager.default.createDirectory(at: handoff, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+    try Data("owned-token".utf8).write(to: handoff.appendingPathComponent("staged"))
+    let keep = destination.appendingPathComponent("keep")
+    try Data("not Feather-owned".utf8).write(to: keep)
+    let script = RemoteHandoffService.finalizationScript(
+      destination: destination.path,
+      controlRoot: root.appendingPathComponent("control").path,
+      configPath: root.appendingPathComponent("control/tmux.conf").path,
+      markerPath: root.appendingPathComponent("control/workspaces/workspace.owner").path,
+      stagingDirectory: staging.path,
+      ownershipToken: "owned-token",
+      workspaceSessionID: "feather-workspace-collision"
+    )
+
+    let result = try CommandRunner().run(
+      "/bin/sh",
+      arguments: ["-c", script],
+      environment: [
+        "PATH": tmux.deletingLastPathComponent().path + ":/usr/bin:/bin"
+      ],
+      allowFailure: true
+    )
+
+    #expect(result.status != 0)
+    #expect(FileManager.default.fileExists(atPath: keep.path))
+    #expect(!FileManager.default.fileExists(atPath: staging.path))
+  }
+
+  private func fixtureState() -> RemoteHandoffStateFingerprint {
+    RemoteHandoffStateFingerprint(
+      branch: "feature/test",
+      baseCommit: String(repeating: "a", count: 40),
+      headCommit: String(repeating: "b", count: 40),
+      publishedCommit: String(repeating: "a", count: 40),
+      statusSHA256: String(repeating: "1", count: 64),
+      indexPatchSHA256: String(repeating: "2", count: 64),
+      worktreePatchSHA256: String(repeating: "3", count: 64),
+      untrackedPathsSHA256: String(repeating: "4", count: 64),
+      untrackedEntriesSHA256: String(repeating: "5", count: 64),
+      stagedPathCount: 1,
+      unstagedPathCount: 1,
+      untrackedFileCount: 1,
+      untrackedBytes: 12,
+      unpublishedCommitCount: 1
+    )
   }
 
   @Test
@@ -139,6 +280,23 @@ struct RemoteHandoffTests {
     )
     #expect(throws: RemoteHandoffError.invalidOwnershipMetadata) {
       try RemoteWorkspaceOwnershipValidator.validate(unsafe)
+    }
+    let invalidManifest = RemoteWorkspaceRecord(
+      repositoryID: repositoryID,
+      worktreePath: "/tmp/project",
+      profileID: nil,
+      profileName: "Build Mac",
+      remote: remote,
+      ownership: valid.ownership,
+      handoff: RemoteHandoffManifest(
+        version: RemoteHandoffManifest.currentVersion + 1,
+        state: fixtureState(),
+        bundleSHA256: nil,
+        artifactBytes: 1
+      )
+    )
+    #expect(throws: RemoteHandoffError.invalidOwnershipMetadata) {
+      try RemoteWorkspaceOwnershipValidator.validate(invalidManifest)
     }
     let state = try await RemoteHandoffService(sshExecutable: "/does/not/exist")
       .checkWorkspace(unsafe)
@@ -295,7 +453,8 @@ struct RemoteHandoffTests {
       profileID: nil,
       profileName: "Fixture Host",
       remote: preparation.remote,
-      ownership: preparation.ownership
+      ownership: preparation.ownership,
+      handoff: preparation.manifest
     )
 
     #expect(fileManager.fileExists(atPath: preparation.ownership.markerPath))
@@ -349,8 +508,14 @@ struct RemoteHandoffTests {
     )
     #expect(try await reconnectedBackend.sessionExists("feather-agent"))
     try await reconnectedBackend.acknowledgeAttention(sessionID: "feather-agent")
-    let acknowledgedState = try await reconnectedBackend.runtimeSnapshots()
-      .first { $0.sessionID == "feather-agent" }?.state
+    var acknowledgedState: TerminalRuntimeState?
+    for _ in 0..<50 where acknowledgedState != .shell {
+      acknowledgedState = try await reconnectedBackend.runtimeSnapshots()
+        .first { $0.sessionID == "feather-agent" }?.state
+      if acknowledgedState != .shell {
+        try await Task.sleep(for: .milliseconds(20))
+      }
+    }
     #expect(acknowledgedState == .shell)
     try await reconnectedBackend.killSession("feather-agent")
     #expect(
@@ -359,6 +524,13 @@ struct RemoteHandoffTests {
         in: try await reconnectedBackend.runtimeSnapshots()
       ) == .exited
     )
+    try Data("tampered manifest".utf8).write(
+      to: URL(
+        fileURLWithPath: preparation.remote.workingDirectory
+          + "/.git/feather-handoff/manifest.json"
+      )
+    )
+    #expect(try await service.checkWorkspace(workspace) == .ownershipMismatch)
     try await reconnectedBackend.killServer()
   }
 

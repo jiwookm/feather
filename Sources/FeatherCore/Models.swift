@@ -304,6 +304,91 @@ public struct RemoteWorkspaceOwnership: Codable, Equatable, Sendable {
   }
 }
 
+public struct RemoteHandoffStateFingerprint: Codable, Equatable, Sendable {
+  public let branch: String
+  public let baseCommit: String
+  public let headCommit: String
+  public let publishedCommit: String?
+  public let statusSHA256: String
+  public let indexPatchSHA256: String
+  public let worktreePatchSHA256: String
+  public let untrackedPathsSHA256: String
+  public let untrackedEntriesSHA256: String
+  public let stagedPathCount: Int
+  public let unstagedPathCount: Int
+  public let untrackedFileCount: Int
+  public let untrackedBytes: Int64
+  public let unpublishedCommitCount: Int
+
+  public init(
+    branch: String,
+    baseCommit: String,
+    headCommit: String,
+    publishedCommit: String?,
+    statusSHA256: String,
+    indexPatchSHA256: String,
+    worktreePatchSHA256: String,
+    untrackedPathsSHA256: String,
+    untrackedEntriesSHA256: String,
+    stagedPathCount: Int,
+    unstagedPathCount: Int,
+    untrackedFileCount: Int,
+    untrackedBytes: Int64,
+    unpublishedCommitCount: Int
+  ) {
+    self.branch = branch
+    self.baseCommit = baseCommit
+    self.headCommit = headCommit
+    self.publishedCommit = publishedCommit
+    self.statusSHA256 = statusSHA256
+    self.indexPatchSHA256 = indexPatchSHA256
+    self.worktreePatchSHA256 = worktreePatchSHA256
+    self.untrackedPathsSHA256 = untrackedPathsSHA256
+    self.untrackedEntriesSHA256 = untrackedEntriesSHA256
+    self.stagedPathCount = stagedPathCount
+    self.unstagedPathCount = unstagedPathCount
+    self.untrackedFileCount = untrackedFileCount
+    self.untrackedBytes = untrackedBytes
+    self.unpublishedCommitCount = unpublishedCommitCount
+  }
+
+  public var isPublishedClean: Bool {
+    publishedCommit == headCommit && stagedPathCount == 0 && unstagedPathCount == 0
+      && untrackedFileCount == 0
+  }
+}
+
+public struct RemoteHandoffManifest: Codable, Equatable, Sendable {
+  public static let currentVersion = 1
+
+  public let version: Int
+  public let state: RemoteHandoffStateFingerprint
+  public let bundleSHA256: String?
+  public let artifactBytes: Int64
+
+  public init(
+    version: Int = RemoteHandoffManifest.currentVersion,
+    state: RemoteHandoffStateFingerprint,
+    bundleSHA256: String?,
+    artifactBytes: Int64
+  ) {
+    self.version = version
+    self.state = state
+    self.bundleSHA256 = bundleSHA256
+    self.artifactBytes = artifactBytes
+  }
+}
+
+public struct RemoteHandoffPreflight: Equatable, Sendable {
+  public let state: RemoteHandoffStateFingerprint
+  public let transferBytes: Int64
+
+  public init(state: RemoteHandoffStateFingerprint, transferBytes: Int64) {
+    self.state = state
+    self.transferBytes = transferBytes
+  }
+}
+
 public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable {
   public let id: UUID
   public let repositoryID: UUID
@@ -312,6 +397,7 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
   public let profileName: String
   public let remote: SSHRemoteTerminal
   public let ownership: RemoteWorkspaceOwnership?
+  public let handoff: RemoteHandoffManifest?
 
   public init(
     id: UUID = UUID(),
@@ -320,7 +406,8 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
     profileID: UUID?,
     profileName: String,
     remote: SSHRemoteTerminal,
-    ownership: RemoteWorkspaceOwnership?
+    ownership: RemoteWorkspaceOwnership?,
+    handoff: RemoteHandoffManifest? = nil
   ) {
     self.id = id
     self.repositoryID = repositoryID
@@ -329,6 +416,7 @@ public struct RemoteWorkspaceRecord: Codable, Equatable, Identifiable, Sendable 
     self.profileName = profileName
     self.remote = remote
     self.ownership = ownership
+    self.handoff = handoff
   }
 
   public func matches(repositoryID: UUID, worktreePath: String) -> Bool {
@@ -477,7 +565,7 @@ public protocol TerminalBackend: Actor {
 }
 
 public struct ApplicationSnapshot: Codable, Equatable, Sendable {
-  public static let currentVersion = 6
+  public static let currentVersion = 7
 
   public var version: Int
   public var repositories: [RepositoryRecord]
