@@ -25,8 +25,14 @@ struct TerminalWorkspaceView: View {
       } else if let remoteState = selectedRemoteBlockingState {
         remoteBlockingView(remoteState)
       } else if let terminal = model.selectedTerminal {
-        TerminalSurfaceContainer(terminal: terminal)
-          .id(surfaceIdentity(terminal))
+        if model.remoteWorkspace(for: terminal) != nil,
+          model.runtimeState(for: terminal) == .exited
+        {
+          remoteTerminalExitedView(terminal)
+        } else {
+          TerminalSurfaceContainer(terminal: terminal)
+            .id(surfaceIdentity(terminal))
+        }
       } else {
         noTerminalView
       }
@@ -188,6 +194,21 @@ struct TerminalWorkspaceView: View {
           .controlSize(.small)
           .disabled(model.isBusy)
       }
+    }
+  }
+
+  private func remoteTerminalExitedView(_ terminal: TerminalRecord) -> some View {
+    emptyState(
+      symbol: "rectangle.slash",
+      title: "Remote session exited",
+      message:
+        "The saved tmux session no longer exists. Feather left the record visible and did not recreate the process."
+    ) {
+      Button("Close Terminal") {
+        model.requestCloseTerminal(terminal.id, requiresConfirmation: false)
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.small)
     }
   }
 
