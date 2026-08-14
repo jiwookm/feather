@@ -13,6 +13,8 @@ public struct GitHubPullRequest: Codable, Equatable, Sendable {
   public let reviewDecision: String?
   public let headRefName: String
   public let baseRefName: String
+  public let headRefOid: String?
+  public let mergeStateStatus: String?
   public let author: Author?
 }
 
@@ -33,11 +35,45 @@ public struct GitHubPullRequestSnapshot: Equatable, Sendable {
     self.pullRequest = pullRequest
     self.checks = checks
   }
+
+  public var mergeBlockReason: String? {
+    guard pullRequest.state.uppercased() == "OPEN" else {
+      return "Only an open pull request can be merged."
+    }
+    guard !pullRequest.isDraft else { return "Mark the pull request ready before merging." }
+    guard pullRequest.headRefOid?.isEmpty == false else {
+      return "Refresh to verify the pull request head commit."
+    }
+    if pullRequest.reviewDecision?.uppercased() == "CHANGES_REQUESTED" {
+      return "Requested changes must be resolved before merging."
+    }
+    if checks.contains(where: { $0.bucket.lowercased() == "pending" }) {
+      return "Wait for pending checks to finish."
+    }
+    if checks.contains(where: {
+      ["fail", "cancel"].contains($0.bucket.lowercased())
+    }) {
+      return "Resolve failing checks before merging."
+    }
+    switch pullRequest.mergeStateStatus?.uppercased() {
+    case "BLOCKED":
+      return "GitHub reports that this pull request is blocked."
+    case "BEHIND":
+      return "Update the branch before merging."
+    case "DIRTY":
+      return "Resolve merge conflicts before merging."
+    case "UNKNOWN":
+      return "GitHub is still calculating mergeability."
+    default:
+      return nil
+    }
+  }
 }
 
 public enum GitHubServiceError: LocalizedError, Equatable, Sendable {
   case cliUnavailable
   case noPullRequest
+  case missingHeadCommit
 
   public var errorDescription: String? {
     switch self {
@@ -45,6 +81,8 @@ public enum GitHubServiceError: LocalizedError, Equatable, Sendable {
       "GitHub CLI was not found. Install it with `brew install gh`, then run `gh auth login`."
     case .noPullRequest:
       "This branch does not have an open pull request."
+    case .missingHeadCommit:
+      "Refresh the pull request before merging so Feather can pin its head commit."
     }
   }
 }
@@ -81,7 +119,7 @@ public actor GitHubService {
       executable,
       arguments: [
         "pr", "view", "--json",
-        "number,title,state,isDraft,url,reviewDecision,headRefName,baseRefName,author",
+        "number,title,state,isDraft,url,reviewDecision,headRefName,baseRefName,headRefOid,mergeStateStatus,author",
       ],
       currentDirectory: directory,
       environment: ["GH_PROMPT_DISABLED": "1"],
@@ -143,6 +181,35 @@ public actor GitHubService {
       throw BoundedCommandFailure(
         executable: executable,
         arguments: ["pr", "create", "--web"],
+        status: output.status,
+        stderr: output.stderrText
+      )
+    }
+  }
+
+  public func mergePullRequest(
+    _ pullRequest: GitHubPullRequest,
+    worktreePath: String
+  ) async throws {
+    guard let executable else { throw GitHubServiceError.cliUnavailable }
+    guard let headRefOid = pullRequest.headRefOid, !headRefOid.isEmpty else {
+      throw GitHubServiceError.missingHeadCommit
+    }
+    let arguments = [
+      "pr", "merge", String(pullRequest.number), "--squash", "--match-head-commit", headRefOid,
+    ]
+    let output = try await runner.run(
+      executable,
+      arguments: arguments,
+      currentDirectory: URL(fileURLWithPath: worktreePath, isDirectory: true),
+      environment: ["GH_PROMPT_DISABLED": "1"],
+      maximumOutputBytes: 512 * 1_024,
+      timeout: 120
+    )
+    guard output.status == 0 else {
+      throw BoundedCommandFailure(
+        executable: executable,
+        arguments: arguments,
         status: output.status,
         stderr: output.stderrText
       )

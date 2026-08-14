@@ -14,7 +14,6 @@ struct NativeDiffViewer: View {
   let path: String
   let isDark: Bool
   let layout: NativeDiffLayout
-  let wrapsLines: Bool
 
   var body: some View {
     switch layout {
@@ -22,8 +21,7 @@ struct NativeDiffViewer: View {
       NativeUnifiedDiffTextView(
         document: document,
         path: path,
-        isDark: isDark,
-        wrapsLines: wrapsLines
+        isDark: isDark
       )
     case .split:
       VStack(spacing: 0) {
@@ -52,7 +50,6 @@ private struct NativeUnifiedDiffTextView: NSViewRepresentable {
   let document: UnifiedDiffDocument
   let path: String
   let isDark: Bool
-  let wrapsLines: Bool
 
   func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -64,7 +61,7 @@ private struct NativeUnifiedDiffTextView: NSViewRepresentable {
     let scrollView = container.scrollView
     guard let textView = scrollView.documentView as? NSTextView else { return }
     DiffTextSurface.configure(
-      scrollView, textView: textView, isDark: isDark, wrapsLines: wrapsLines)
+      scrollView, textView: textView, isDark: isDark, wrapsLines: true)
     let changed =
       context.coordinator.document != document || context.coordinator.path != path
       || context.coordinator.isDark != isDark
@@ -108,6 +105,8 @@ private final class SynchronizedDiffContainer: NSView {
   private var document: UnifiedDiffDocument?
   private var path: String?
   private var isDark: Bool?
+  private var renderedLeftWidth: CGFloat?
+  private var renderedRightWidth: CGFloat?
 
   override init(frame frameRect: NSRect) {
     super.init(frame: frameRect)
@@ -150,27 +149,50 @@ private final class SynchronizedDiffContainer: NSView {
       scrollView.tile()
       TextSurfaceContainerView.fitDocument(in: scrollView)
     }
+    renderIfNeeded()
   }
 
   func update(document: UnifiedDiffDocument, path: String, isDark: Bool) {
     for scrollView in [leftScrollView, rightScrollView] {
       guard let textView = scrollView.documentView as? NSTextView else { continue }
-      DiffTextSurface.configure(scrollView, textView: textView, isDark: isDark, wrapsLines: false)
+      DiffTextSurface.configure(scrollView, textView: textView, isDark: isDark, wrapsLines: true)
     }
     guard self.document != document || self.path != path || self.isDark != isDark else { return }
     self.document = document
     self.path = path
     self.isDark = isDark
+    renderedLeftWidth = nil
+    renderedRightWidth = nil
     divider.layer?.backgroundColor = NSColor(hex: isDark ? 0x242424 : 0xE2E2E2).cgColor
-    let sides = DiffAttributedText.split(document, path: path, isDark: isDark)
-    if let textView = leftScrollView.documentView as? NSTextView {
-      textView.textStorage?.setAttributedString(sides.left)
-      DiffTextSurface.refresh(textView)
-    }
-    if let textView = rightScrollView.documentView as? NSTextView {
-      textView.textStorage?.setAttributedString(sides.right)
-      DiffTextSurface.refresh(textView)
-    }
+    renderIfNeeded()
+  }
+
+  private func renderIfNeeded() {
+    guard let document, let path, let isDark,
+      let leftTextView = leftScrollView.documentView as? NSTextView,
+      let rightTextView = rightScrollView.documentView as? NSTextView,
+      let leftWidth = DiffTextSurface.lineFragmentWidth(in: leftTextView),
+      let rightWidth = DiffTextSurface.lineFragmentWidth(in: rightTextView),
+      leftWidth > 0, rightWidth > 0
+    else { return }
+    guard
+      renderedLeftWidth.map({ abs($0 - leftWidth) > 0.5 }) ?? true
+        || renderedRightWidth.map({ abs($0 - rightWidth) > 0.5 }) ?? true
+    else { return }
+    renderedLeftWidth = leftWidth
+    renderedRightWidth = rightWidth
+
+    let sides = DiffAttributedText.split(
+      document,
+      path: path,
+      isDark: isDark,
+      leftWidth: leftWidth,
+      rightWidth: rightWidth
+    )
+    leftTextView.textStorage?.setAttributedString(sides.left)
+    DiffTextSurface.refresh(leftTextView)
+    rightTextView.textStorage?.setAttributedString(sides.right)
+    DiffTextSurface.refresh(rightTextView)
   }
 
   @objc private func scrolled(_ notification: Notification) {
@@ -250,6 +272,11 @@ private enum DiffTextSurface {
     textView.needsDisplay = true
     textView.layer?.setNeedsDisplay()
   }
+
+  static func lineFragmentWidth(in textView: NSTextView) -> CGFloat? {
+    guard let container = textView.textContainer else { return nil }
+    return max(0, container.containerSize.width - (container.lineFragmentPadding * 2))
+  }
 }
 
 extension NSAttributedString.Key {
@@ -326,19 +353,23 @@ private enum DiffAttributedText {
   static func split(
     _ document: UnifiedDiffDocument,
     path: String,
-    isDark: Bool
+    isDark: Bool,
+    leftWidth: CGFloat,
+    rightWidth: CGFloat
   ) -> (left: NSAttributedString, right: NSAttributedString) {
     let left = NSMutableAttributedString()
     let right = NSMutableAttributedString()
     let highlightsCode = shouldHighlight(document)
     for row in document.splitRows {
+      let leftRow = NSMutableAttributedString()
+      let rightRow = NSMutableAttributedString()
       appendSide(
         row.left,
         oldSide: true,
         path: path,
         isDark: isDark,
         highlightsCode: highlightsCode,
-        to: left
+        to: leftRow
       )
       appendSide(
         row.right,
@@ -346,10 +377,60 @@ private enum DiffAttributedText {
         path: path,
         isDark: isDark,
         highlightsCode: highlightsCode,
+        to: rightRow
+      )
+      let leftLineCount = visualLineCount(leftRow, width: leftWidth)
+      let rightLineCount = visualLineCount(rightRow, width: rightWidth)
+      let rowLineCount = max(leftLineCount, rightLineCount)
+      left.append(leftRow)
+      appendPadding(
+        count: rowLineCount - leftLineCount,
+        for: row.left,
+        isDark: isDark,
+        to: left
+      )
+      right.append(rightRow)
+      appendPadding(
+        count: rowLineCount - rightLineCount,
+        for: row.right,
+        isDark: isDark,
         to: right
       )
     }
     return (left, right)
+  }
+
+  private static func visualLineCount(_ value: NSAttributedString, width: CGFloat) -> Int {
+    guard value.length > 1 else { return 1 }
+    let line = value.attributedSubstring(
+      from: NSRange(location: 0, length: value.length - 1)
+    )
+    let bounds = line.boundingRect(
+      with: NSSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude),
+      options: [.usesFontLeading, .usesLineFragmentOrigin]
+    )
+    return max(1, Int(ceil((bounds.height - 0.5) / NativeCodeStyle.lineHeight)))
+  }
+
+  private static func appendPadding(
+    count: Int,
+    for line: UnifiedDiffDocument.Line?,
+    isDark: Bool,
+    to result: NSMutableAttributedString
+  ) {
+    guard count > 0 else { return }
+    var attributes = baseAttributes(isDark: isDark)
+    if let line,
+      let background = background(for: line.kind, colors: colors(isDark: isDark))
+    {
+      attributes[.featherDiffBackground] = background
+    }
+    result.append(
+      NSAttributedString(
+        string: String(repeating: "\n", count: count),
+        attributes: attributes
+      )
+    )
   }
 
   private static func appendSide(
@@ -402,13 +483,22 @@ private enum DiffAttributedText {
     }
     result.append(NSAttributedString(string: "\n", attributes: baseAttributes(isDark: isDark)))
     let range = NSRange(location: start, length: result.length - start)
+    result.addAttribute(.paragraphStyle, value: paragraphStyle(), range: range)
     if let background = background(for: line.kind, colors: colors) {
       result.addAttribute(.featherDiffBackground, value: background, range: range)
     }
   }
 
   private static func baseAttributes(isDark: Bool) -> [NSAttributedString.Key: Any] {
-    NativeCodeStyle.baseAttributes(isDark: isDark)
+    var attributes = NativeCodeStyle.baseAttributes(isDark: isDark)
+    attributes[.paragraphStyle] = paragraphStyle()
+    return attributes
+  }
+
+  private static func paragraphStyle() -> NSParagraphStyle {
+    let style = NativeCodeStyle.paragraphStyle().mutableCopy() as! NSMutableParagraphStyle
+    style.lineBreakMode = .byCharWrapping
+    return style
   }
 
   private static func codeLength(in document: UnifiedDiffDocument) -> Int {
