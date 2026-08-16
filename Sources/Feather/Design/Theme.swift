@@ -53,20 +53,74 @@ extension NSColor {
 @MainActor
 enum FeatherWindow {
   static weak var workspace: NSWindow?
+  private static weak var titlebarAlignmentGuide: NSView?
+  private static var windowObservers: [NSObjectProtocol] = []
+  private static var alignmentScheduled = false
+
+  static func track(_ window: NSWindow, titlebarAlignmentGuide: NSView) {
+    self.titlebarAlignmentGuide = titlebarAlignmentGuide
+
+    if workspace !== window {
+      for observer in windowObservers {
+        NotificationCenter.default.removeObserver(observer)
+      }
+      windowObservers.removeAll()
+      workspace = window
+
+      for name in [
+        NSWindow.didResizeNotification,
+        NSWindow.didChangeScreenNotification,
+        NSWindow.didChangeBackingPropertiesNotification,
+        NSWindow.didExitFullScreenNotification,
+      ] {
+        windowObservers.append(
+          NotificationCenter.default.addObserver(
+            forName: name,
+            object: window,
+            queue: .main
+          ) { [weak window] _ in
+            Task { @MainActor in
+              guard let window, window === workspace else { return }
+              scheduleWindowButtonAlignment()
+            }
+          }
+        )
+      }
+    }
+
+    scheduleWindowButtonAlignment()
+  }
+
+  static func scheduleWindowButtonAlignment() {
+    guard !alignmentScheduled else { return }
+    alignmentScheduled = true
+    DispatchQueue.main.async {
+      alignmentScheduled = false
+      alignWindowButtons()
+    }
+  }
 
   static func alignWindowButtons() {
-    guard let window = workspace, !window.styleMask.contains(.fullScreen) else { return }
-    let screenPoint = NSPoint(
-      x: window.frame.minX,
-      y: window.frame.maxY - FeatherMetrics.titlebarHeight(false) / 2
+    guard let window = workspace, let titlebarAlignmentGuide else { return }
+    alignWindowButtons(in: window, with: titlebarAlignmentGuide)
+  }
+
+  static func alignWindowButtons(in window: NSWindow, with titlebarAlignmentGuide: NSView) {
+    guard !window.styleMask.contains(.fullScreen),
+      titlebarAlignmentGuide.window === window,
+      titlebarAlignmentGuide.bounds.height > 0
+    else { return }
+
+    let guideCenter = titlebarAlignmentGuide.convert(
+      NSPoint(x: titlebarAlignmentGuide.bounds.midX, y: titlebarAlignmentGuide.bounds.midY),
+      to: nil
     )
-    let windowPoint = window.convertPoint(fromScreen: screenPoint)
 
     for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
       guard let button = window.standardWindowButton(kind), let container = button.superview else {
         continue
       }
-      let target = container.convert(windowPoint, from: nil).y - button.frame.height / 2
+      let target = container.convert(guideCenter, from: nil).y - button.frame.height / 2
       button.setFrameOrigin(NSPoint(x: button.frame.minX, y: target))
     }
   }
@@ -95,7 +149,10 @@ struct HoverButtonStyle: ButtonStyle {
 
 struct WindowDragSurface: NSViewRepresentable {
   func makeNSView(context: Context) -> NSView { DragView() }
-  func updateNSView(_ nsView: NSView, context: Context) {}
+  func updateNSView(_ nsView: NSView, context: Context) {
+    guard let window = nsView.window else { return }
+    FeatherWindow.track(window, titlebarAlignmentGuide: nsView)
+  }
 
   private final class DragView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
@@ -103,9 +160,20 @@ struct WindowDragSurface: NSViewRepresentable {
     override func viewDidMoveToWindow() {
       super.viewDidMoveToWindow()
       if let window {
-        FeatherWindow.workspace = window
-        DispatchQueue.main.async { FeatherWindow.alignWindowButtons() }
+        FeatherWindow.track(window, titlebarAlignmentGuide: self)
       }
+    }
+
+    override func layout() {
+      super.layout()
+      guard let window else { return }
+      FeatherWindow.track(window, titlebarAlignmentGuide: self)
+    }
+
+    override func viewDidChangeBackingProperties() {
+      super.viewDidChangeBackingProperties()
+      guard let window else { return }
+      FeatherWindow.track(window, titlebarAlignmentGuide: self)
     }
   }
 }

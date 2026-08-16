@@ -2,6 +2,7 @@ import AppKit
 import FeatherCore
 import Foundation
 import GhosttyKit
+import QuartzCore
 
 extension Notification.Name {
   static let featherNewTerminalRequested = Notification.Name("FeatherNewTerminalRequested")
@@ -140,11 +141,19 @@ final class TerminalRegistry {
     }
     let view = session.makeView()
     if var handlers = view.handlers {
-      let updateContentScale = handlers.updateContentScale
-      handlers.updateContentScale = { [weak session, weak view] in
-        updateContentScale()
+      let displayChanged = handlers.displayChanged
+      let synchronizeGeometry = { [weak session, weak view] in
         guard let session, let view else { return }
-        session.resize(to: view.bounds.size)
+        synchronizeTerminalSurfaceGeometry(session: session, view: view)
+      }
+      handlers.updateContentScale = synchronizeGeometry
+      handlers.displayChanged = { displayID in
+        displayChanged(displayID)
+        synchronizeGeometry()
+        DispatchQueue.main.async { [weak session, weak view] in
+          guard let session, let view else { return }
+          synchronizeTerminalSurfaceGeometry(session: session, view: view)
+        }
       }
       view.handlers = handlers
     }
@@ -171,6 +180,28 @@ final class TerminalRegistry {
       handle.host.setColorScheme(appearance.ghosttyColorScheme)
     }
   }
+}
+
+@MainActor
+private func synchronizeTerminalSurfaceGeometry(
+  session: GhosttyTerminalSession,
+  view: GhosttyTerminalView
+) {
+  let scale =
+    view.window?.backingScaleFactor
+    ?? view.window?.screen?.backingScaleFactor
+    ?? NSScreen.main?.backingScaleFactor
+    ?? 2
+  guard scale.isFinite, scale > 0 else { return }
+
+  CATransaction.begin()
+  CATransaction.setDisableActions(true)
+  view.layer?.contentsScale = scale
+  CATransaction.commit()
+
+  session.updateContentScale()
+  session.resize(to: view.bounds.size)
+  session.requestRender()
 }
 
 extension AppearancePreference {
@@ -268,6 +299,7 @@ enum FeatherGhosttyConfiguration {
       cursor-style-blink = true
       cursor-opacity = 1
       mouse-hide-while-typing = false
+      mouse-scroll-multiplier = precision:0.35,discrete:3
       copy-on-select = false
       shell-integration = none
       keybind = super+,=unbind
