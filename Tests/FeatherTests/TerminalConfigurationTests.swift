@@ -1,3 +1,4 @@
+import AppKit
 import FeatherCore
 import Foundation
 import GhosttyKit
@@ -70,6 +71,7 @@ struct TerminalConfigurationTests {
     #expect(configText.contains("cursor-style = bar"))
     #expect(configText.contains("cursor-style-blink = true"))
     #expect(configText.contains("mouse-hide-while-typing = false"))
+    #expect(configText.contains("mouse-scroll-multiplier = precision:0.35,discrete:3"))
     #expect(configText.contains("background-opacity = 1"))
     #expect(configText.contains("keybind = super+w=unbind"))
     #expect(configText.contains("keybind = super+d=unbind"))
@@ -148,10 +150,22 @@ struct TerminalConfigurationTests {
     firstHandle?.view.frame.size = CGSize(width: 640, height: 480)
     let firstSurface = try #require(firstHandle?.session.surface)
     ghostty_surface_set_size(firstSurface, 1, 1)
+    firstHandle?.view.layer?.contentsScale = 99
     firstHandle?.view.handlers?.updateContentScale()
     let correctedSize = ghostty_surface_size(firstSurface)
     #expect(correctedSize.width_px > 1)
     #expect(correctedSize.height_px > 1)
+    let expectedScale =
+      firstHandle?.view.window?.backingScaleFactor
+      ?? NSScreen.main?.backingScaleFactor
+      ?? 2
+    #expect(firstHandle?.view.layer?.contentsScale == expectedScale)
+
+    ghostty_surface_set_size(firstSurface, 1, 1)
+    firstHandle?.view.handlers?.displayChanged(nil)
+    let screenChangeCorrectedSize = ghostty_surface_size(firstSurface)
+    #expect(screenChangeCorrectedSize.width_px > 1)
+    #expect(screenChangeCorrectedSize.height_px > 1)
 
     var clients = ""
     for _ in 0..<100 where !clients.contains(first.tmuxSessionID) {
