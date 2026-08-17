@@ -350,6 +350,7 @@ struct SidebarView: View {
       .padding(.leading, 8)
       .padding(.trailing, 3)
       .padding(.vertical, 6)
+      .frame(maxWidth: .infinity, alignment: .leading)
       .background(mainSelected ? palette.selection : .clear)
       .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
