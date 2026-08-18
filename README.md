@@ -107,7 +107,9 @@ system, cloud control plane, or synchronization service. Its small in-tree lexic
 explicitly opened file or diff; hiding the inspector or editor leaves no scan, watcher, or
 background task alive. Agent sessions remain ordinary terminal programs.
 
-The Ghostty renderer is consumed through the pinned MIT-licensed GhosttyKit package. See [Third-party notices](Resources/ThirdPartyNotices.txt).
+The renderer is Ghostty's pinned first-party native library. Feather owns the smallest Swift/AppKit
+boundary needed to host its Metal surface; no third-party Swift terminal wrapper is shipped. See
+[Third-party notices](Resources/ThirdPartyNotices.txt).
 
 ## License
 

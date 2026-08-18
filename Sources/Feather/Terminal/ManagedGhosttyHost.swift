@@ -1,5 +1,5 @@
 import AppKit
-import GhosttyKit
+import LibGhostty
 
 enum ManagedGhosttyHostError: LocalizedError {
   case initializationFailed
@@ -22,13 +22,11 @@ enum ManagedGhosttyHostError: LocalizedError {
 }
 
 /// A narrow libghostty host that loads one explicit, app-owned configuration.
-/// GhosttyKit's default host intentionally loads Ghostty's user files, which is
-/// useful for terminal apps but contrary to Feather's fixed two-theme contract.
 @MainActor
-final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
+final class ManagedGhosttyHost {
   nonisolated(unsafe) private(set) var app: ghostty_app_t?
   nonisolated(unsafe) private(set) var config: ghostty_config_t?
-  private(set) var configDiagnostics: [GhosttyTerminalConfigDiagnostic] = []
+  private(set) var configDiagnostics: [FeatherGhosttyConfigDiagnostic] = []
 
   private let configURL: URL
   private var sessions: [ObjectIdentifier: WeakManagedGhosttySession] = [:]
@@ -116,11 +114,11 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
     }
   }
 
-  func register(_ session: GhosttyTerminalSession) {
+  func register(_ session: FeatherGhosttySession) {
     sessions[ObjectIdentifier(session)] = WeakManagedGhosttySession(value: session)
   }
 
-  func unregister(_ session: GhosttyTerminalSession) {
+  func unregister(_ session: FeatherGhosttySession) {
     sessions.removeValue(forKey: ObjectIdentifier(session))
   }
 
@@ -129,8 +127,8 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
     ghostty_app_tick(app)
   }
 
-  func setColorScheme(_ colorScheme: GhosttyTerminalColorScheme, appearance: NSAppearance? = nil) {
-    guard let app, let scheme = managedGhosttyColorScheme(colorScheme, appearance: appearance)
+  func setColorScheme(_ colorScheme: FeatherGhosttyColorScheme, appearance: NSAppearance? = nil) {
+    guard let app, let scheme = resolveGhosttyColorScheme(colorScheme, appearance: appearance)
     else { return }
     ghostty_app_set_color_scheme(app, scheme)
     for session in liveSessions() {
@@ -165,7 +163,7 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
   func openConfig() {}
 
   @discardableResult
-  fileprivate func handle(action: GhosttyTerminalAction) -> Bool {
+  fileprivate func handle(action: FeatherGhosttyAction) -> Bool {
     switch action {
     case .render:
       for session in liveSessions() {
@@ -185,7 +183,7 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
     }
   }
 
-  private func liveSessions() -> [GhosttyTerminalSession] {
+  private func liveSessions() -> [FeatherGhosttySession] {
     sessions = sessions.filter { $0.value.value != nil }
     return sessions.values.compactMap(\.value)
   }
@@ -231,36 +229,18 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
 
   private static func collectDiagnostics(
     from config: ghostty_config_t?
-  ) -> [GhosttyTerminalConfigDiagnostic] {
+  ) -> [FeatherGhosttyConfigDiagnostic] {
     guard let config else { return [] }
     return (0..<ghostty_config_diagnostics_count(config)).compactMap { index in
       let diagnostic = ghostty_config_get_diagnostic(config, index)
       guard let message = diagnostic.message else { return nil }
-      return GhosttyTerminalConfigDiagnostic(message: String(cString: message))
+      return FeatherGhosttyConfigDiagnostic(message: String(cString: message))
     }
   }
 }
 
 private struct WeakManagedGhosttySession {
-  weak var value: GhosttyTerminalSession?
-}
-
-@MainActor
-private func managedGhosttyColorScheme(
-  _ colorScheme: GhosttyTerminalColorScheme,
-  appearance: NSAppearance?
-) -> ghostty_color_scheme_e? {
-  switch colorScheme {
-  case .light:
-    GHOSTTY_COLOR_SCHEME_LIGHT
-  case .dark:
-    GHOSTTY_COLOR_SCHEME_DARK
-  case .system:
-    (appearance ?? NSApp?.effectiveAppearance ?? NSAppearance(named: .aqua))?
-      .bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-      ? GHOSTTY_COLOR_SCHEME_DARK
-      : GHOSTTY_COLOR_SCHEME_LIGHT
-  }
+  weak var value: FeatherGhosttySession?
 }
 
 private func featherGhosttyWakeup(_ userdata: UnsafeMutableRawPointer?) {
@@ -277,11 +257,15 @@ private func featherGhosttyAction(
     return false
   }
   let terminalAction = managedGhosttyAction(from: action)
+  let targetSession =
+    target.tag == GHOSTTY_TARGET_SURFACE
+    ? managedGhosttySession(for: target.target.surface)
+    : nil
   Task { @MainActor in
     switch target.tag {
     case GHOSTTY_TARGET_SURFACE:
-      if let session = managedGhosttySession(for: target.target.surface) {
-        _ = session.handle(action: terminalAction)
+      if let targetSession {
+        _ = targetSession.handle(action: terminalAction)
       }
     case GHOSTTY_TARGET_APP:
       _ = host.handle(action: terminalAction)
@@ -347,26 +331,20 @@ private func managedGhosttyHost(from pointer: UnsafeMutableRawPointer?) -> Manag
   return Unmanaged<ManagedGhosttyHost>.fromOpaque(pointer).takeUnretainedValue()
 }
 
-private func managedGhosttySession(for surface: ghostty_surface_t?) -> GhosttyTerminalSession? {
+private func managedGhosttySession(for surface: ghostty_surface_t?) -> FeatherGhosttySession? {
   guard let surface, let userdata = ghostty_surface_userdata(surface) else { return nil }
   return managedGhosttySession(from: userdata)
 }
 
 private func managedGhosttySession(from pointer: UnsafeMutableRawPointer?)
-  -> GhosttyTerminalSession?
+  -> FeatherGhosttySession?
 {
   guard let pointer else { return nil }
-  return Unmanaged<GhosttyTerminalSession>.fromOpaque(pointer).takeUnretainedValue()
+  return Unmanaged<FeatherGhosttySession>.fromOpaque(pointer).takeUnretainedValue()
 }
 
-private func managedGhosttyAction(from action: ghostty_action_s) -> GhosttyTerminalAction {
+private func managedGhosttyAction(from action: ghostty_action_s) -> FeatherGhosttyAction {
   switch action.tag {
-  case GHOSTTY_ACTION_SET_TITLE:
-    .setTitle(managedString(from: action.action.set_title.title))
-  case GHOSTTY_ACTION_SET_TAB_TITLE:
-    .setTabTitle(managedString(from: action.action.set_tab_title.title))
-  case GHOSTTY_ACTION_PWD:
-    .workingDirectory(managedString(from: action.action.pwd.pwd))
   case GHOSTTY_ACTION_MOUSE_OVER_LINK:
     .hoveredLink(
       managedString(
@@ -380,14 +358,7 @@ private func managedGhosttyAction(from action: ghostty_action_s) -> GhosttyTermi
         length: Int(action.action.open_url.len)
       ))
   case GHOSTTY_ACTION_DESKTOP_NOTIFICATION:
-    .desktopNotification(
-      title: managedString(from: action.action.desktop_notification.title) ?? "Feather",
-      body: managedString(from: action.action.desktop_notification.body) ?? ""
-    )
-  case GHOSTTY_ACTION_RENDERER_HEALTH:
-    .rendererHealth(action.action.renderer_health == GHOSTTY_RENDERER_HEALTH_HEALTHY)
-  case GHOSTTY_ACTION_READONLY:
-    .readonly(action.action.readonly == GHOSTTY_READONLY_ON)
+    .desktopNotification
   case GHOSTTY_ACTION_RENDER:
     .render
   case GHOSTTY_ACTION_OPEN_CONFIG:
@@ -396,90 +367,37 @@ private func managedGhosttyAction(from action: ghostty_action_s) -> GhosttyTermi
     .reloadConfig
   case GHOSTTY_ACTION_RING_BELL:
     .ringBell
-  case GHOSTTY_ACTION_START_SEARCH:
-    .startSearch(managedString(from: action.action.start_search.needle) ?? "")
-  case GHOSTTY_ACTION_END_SEARCH:
-    .endSearch
-  case GHOSTTY_ACTION_SEARCH_TOTAL:
-    .searchTotal(Int(action.action.search_total.total))
-  case GHOSTTY_ACTION_SEARCH_SELECTED:
-    .searchSelected(
-      action.action.search_selected.selected >= 0
-        ? Int(action.action.search_selected.selected)
-        : nil
-    )
   case GHOSTTY_ACTION_PROGRESS_REPORT:
     .progress(
-      state: managedProgressState(action.action.progress_report.state),
-      percent: action.action.progress_report.progress >= 0
+      managedProgressState(action.action.progress_report.state),
+      action.action.progress_report.progress >= 0
         ? Int(action.action.progress_report.progress)
         : nil
     )
   case GHOSTTY_ACTION_SHOW_CHILD_EXITED:
-    .childExited(exitCode: Int(action.action.child_exited.exit_code))
+    .childExited
   case GHOSTTY_ACTION_COMMAND_FINISHED:
-    .commandFinished(
-      exitCode: action.action.command_finished.exit_code >= 0
-        ? Int(action.action.command_finished.exit_code)
-        : nil,
-      durationNanoseconds: action.action.command_finished.duration
-    )
+    .commandFinished
   case GHOSTTY_ACTION_SECURE_INPUT:
     managedSecureInputAction(action.action.secure_input)
-  case GHOSTTY_ACTION_NEW_WINDOW:
-    .request(.newWindow)
   case GHOSTTY_ACTION_CLOSE_WINDOW:
     .request(.closeWindow)
   case GHOSTTY_ACTION_NEW_TAB:
     .request(.newTab)
   case GHOSTTY_ACTION_CLOSE_TAB:
     .request(.closeTab)
-  case GHOSTTY_ACTION_NEW_SPLIT:
-    .request(.newSplit(managedSplitDirection(action.action.new_split)))
-  case GHOSTTY_ACTION_EQUALIZE_SPLITS:
-    .request(.equalizeSplits)
-  case GHOSTTY_ACTION_TOGGLE_SPLIT_ZOOM:
-    .request(.toggleSplitZoom)
-  case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
-    .request(.toggleCommandPalette)
-  case GHOSTTY_ACTION_SIZE_LIMIT:
-    .sizeLimit(
-      .init(
-        minimumWidth: Int(action.action.size_limit.min_width),
-        minimumHeight: Int(action.action.size_limit.min_height),
-        maximumWidth: action.action.size_limit.max_width > 0
-          ? Int(action.action.size_limit.max_width)
-          : nil,
-        maximumHeight: action.action.size_limit.max_height > 0
-          ? Int(action.action.size_limit.max_height)
-          : nil
-      ))
-  case GHOSTTY_ACTION_INITIAL_SIZE:
-    .initialSize(
-      .init(
-        width: Int(action.action.initial_size.width),
-        height: Int(action.action.initial_size.height)
-      ))
-  case GHOSTTY_ACTION_CELL_SIZE:
-    .cellSize(
-      .init(
-        width: Int(action.action.cell_size.width),
-        height: Int(action.action.cell_size.height)
-      ))
-  case GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD:
-    .copyTitleToClipboard
   case GHOSTTY_ACTION_MOUSE_SHAPE:
     .mouseShape(action.action.mouse_shape)
   case GHOSTTY_ACTION_MOUSE_VISIBILITY:
-    .mouseVisibility(hidden: action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN)
+    .mouseVisibility(action.action.mouse_visibility == GHOSTTY_MOUSE_HIDDEN)
   default:
-    .unsupported("unknown")
+    .unsupported
   }
 }
 
 private func managedProgressState(
   _ state: ghostty_action_progress_report_state_e
-) -> GhosttyTerminalProgressState {
+) -> FeatherGhosttyProgressState {
   switch state {
   case GHOSTTY_PROGRESS_STATE_SET: .active
   case GHOSTTY_PROGRESS_STATE_ERROR: .error
@@ -491,28 +409,12 @@ private func managedProgressState(
 
 private func managedSecureInputAction(
   _ state: ghostty_action_secure_input_e
-) -> GhosttyTerminalAction {
+) -> FeatherGhosttyAction {
   switch state {
-  case GHOSTTY_SECURE_INPUT_ON: .secureInput(.active)
-  case GHOSTTY_SECURE_INPUT_OFF: .secureInput(.inactive)
-  case GHOSTTY_SECURE_INPUT_TOGGLE: .unsupported("secure_input_toggle")
-  default: .unsupported("secure_input")
+  case GHOSTTY_SECURE_INPUT_ON: .secureInput(true)
+  case GHOSTTY_SECURE_INPUT_OFF: .secureInput(false)
+  default: .unsupported
   }
-}
-
-private func managedSplitDirection(
-  _ direction: ghostty_action_split_direction_e
-) -> GhosttyTerminalSplitDirection {
-  switch direction {
-  case GHOSTTY_SPLIT_DIRECTION_LEFT: .left
-  case GHOSTTY_SPLIT_DIRECTION_UP: .up
-  case GHOSTTY_SPLIT_DIRECTION_DOWN: .down
-  default: .right
-  }
-}
-
-private func managedString(from pointer: UnsafePointer<CChar>?) -> String? {
-  pointer.map(String.init(cString:))
 }
 
 private func managedString(from pointer: UnsafePointer<CChar>?, length: Int) -> String? {

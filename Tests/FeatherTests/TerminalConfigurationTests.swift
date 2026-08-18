@@ -1,7 +1,7 @@
 import AppKit
 import FeatherCore
 import Foundation
-import GhosttyKit
+import LibGhostty
 import Testing
 
 @testable import Feather
@@ -158,7 +158,7 @@ struct TerminalConfigurationTests {
         let surface = try #require(handle.session.surface)
         ghostty_surface_set_size(surface, 1, 1)
         handle.view.layer?.contentsScale = 99
-        handle.view.handlers?.updateContentScale()
+        handle.view.viewDidChangeBackingProperties()
         let correctedSize = ghostty_surface_size(surface)
         #expect(correctedSize.width_px > 1)
         #expect(correctedSize.height_px > 1)
@@ -169,7 +169,7 @@ struct TerminalConfigurationTests {
         #expect(handle.view.layer?.contentsScale == expectedScale)
 
         ghostty_surface_set_size(surface, 1, 1)
-        handle.view.handlers?.displayChanged(nil)
+        handle.session.synchronizeGeometry()
         let screenChangeCorrectedSize = ghostty_surface_size(surface)
         #expect(screenChangeCorrectedSize.width_px > 1)
         #expect(screenChangeCorrectedSize.height_px > 1)
@@ -188,7 +188,7 @@ struct TerminalConfigurationTests {
       handle.dispose()
       #expect(handle.isDisposed)
       #expect(handle.session.surface == nil)
-      #expect(handle.view.handlers == nil)
+      #expect(handle.view.session == nil)
       #expect(handle.host.app == nil)
       #expect(handle.host.config == nil)
       let detachedClients = try await waitForTmuxClients(
@@ -201,6 +201,7 @@ struct TerminalConfigurationTests {
     }
 
     #expect(retainedHandles.compactMap { $0.session.surface }.count == 1)
+    #expect(retainedHandles.compactMap { $0.view.session }.count == 1)
     #expect(retainedHandles.compactMap { $0.host.app }.count == 1)
     #expect(try await backend.sessionExists(first.tmuxSessionID))
     #expect(try await backend.sessionExists(second.tmuxSessionID))

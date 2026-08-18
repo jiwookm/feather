@@ -1,8 +1,6 @@
 import AppKit
 import FeatherCore
 import Foundation
-import GhosttyKit
-import QuartzCore
 
 extension Notification.Name {
   static let featherNewTerminalRequested = Notification.Name("FeatherNewTerminalRequested")
@@ -20,11 +18,11 @@ extension Notification.Name {
 @MainActor
 final class TerminalHandle {
   let host: ManagedGhosttyHost
-  let session: GhosttyTerminalSession
-  let view: GhosttyTerminalView
+  let session: FeatherGhosttySession
+  let view: FeatherGhosttyView
   private(set) var isDisposed = false
 
-  init(host: ManagedGhosttyHost, session: GhosttyTerminalSession, view: GhosttyTerminalView) {
+  init(host: ManagedGhosttyHost, session: FeatherGhosttySession, view: FeatherGhosttyView) {
     self.host = host
     self.session = session
     self.view = view
@@ -101,11 +99,11 @@ final class TerminalRegistry {
       initializationError = error.localizedDescription
       return nil
     }
-    let launch = GhosttyTerminalLaunchConfiguration(
+    let session = FeatherGhosttySession(
+      host: host,
       workingDirectory: terminal.worktreePath,
       colorScheme: appearance.ghosttyColorScheme
     )
-    let session = GhosttyTerminalSession(host: host, configuration: launch)
     session.closeHandler = { processAlive in
       NotificationCenter.default.post(
         name: .featherCloseTerminalRequested,
@@ -126,8 +124,6 @@ final class TerminalRegistry {
           object: nil,
           userInfo: ["terminalID": terminal.id]
         )
-      default:
-        break
       }
     }
     session.actionHandler = { [weak self] action in
@@ -154,23 +150,6 @@ final class TerminalRegistry {
       }
     }
     let view = session.makeView()
-    if var handlers = view.handlers {
-      let displayChanged = handlers.displayChanged
-      let synchronizeGeometry = { [weak session, weak view] in
-        guard let session, let view else { return }
-        synchronizeTerminalSurfaceGeometry(session: session, view: view)
-      }
-      handlers.updateContentScale = synchronizeGeometry
-      handlers.displayChanged = { displayID in
-        displayChanged(displayID)
-        synchronizeGeometry()
-        DispatchQueue.main.async { [weak session, weak view] in
-          guard let session, let view else { return }
-          synchronizeTerminalSurfaceGeometry(session: session, view: view)
-        }
-      }
-      view.handlers = handlers
-    }
     view.layer?.backgroundColor =
       NSColor(hex: appearance.usesLightSurface ? 0xF7F7F7 : 0x0D0D0D)
       .cgColor
@@ -194,30 +173,8 @@ final class TerminalRegistry {
   }
 }
 
-@MainActor
-private func synchronizeTerminalSurfaceGeometry(
-  session: GhosttyTerminalSession,
-  view: GhosttyTerminalView
-) {
-  let scale =
-    view.window?.backingScaleFactor
-    ?? view.window?.screen?.backingScaleFactor
-    ?? NSScreen.main?.backingScaleFactor
-    ?? 2
-  guard scale.isFinite, scale > 0 else { return }
-
-  CATransaction.begin()
-  CATransaction.setDisableActions(true)
-  view.layer?.contentsScale = scale
-  CATransaction.commit()
-
-  session.updateContentScale()
-  session.resize(to: view.bounds.size)
-  session.requestRender()
-}
-
 extension AppearancePreference {
-  fileprivate var ghosttyColorScheme: GhosttyTerminalColorScheme {
+  fileprivate var ghosttyColorScheme: FeatherGhosttyColorScheme {
     switch self {
     case .system: .system
     case .light: .light
