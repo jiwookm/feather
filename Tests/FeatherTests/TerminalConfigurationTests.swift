@@ -89,6 +89,28 @@ struct TerminalConfigurationTests {
     #expect(workingAgain.acknowledgement == .clear)
   }
 
+  @Test
+  func scrollModifiersUseGhosttysPackedPrecisionAndMomentumLayout() {
+    #expect(
+      FeatherGhosttyScrollModifiers.encode(precision: false, momentumPhase: []) == 0
+    )
+    #expect(
+      FeatherGhosttyScrollModifiers.encode(precision: true, momentumPhase: []) == 1
+    )
+    #expect(
+      FeatherGhosttyScrollModifiers.encode(precision: true, momentumPhase: .stationary)
+        == 1 | ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_STATIONARY.rawValue) << 1
+    )
+    #expect(
+      FeatherGhosttyScrollModifiers.encode(precision: true, momentumPhase: .changed)
+        == 1 | ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_CHANGED.rawValue) << 1
+    )
+    #expect(
+      FeatherGhosttyScrollModifiers.encode(precision: false, momentumPhase: .mayBegin)
+        == ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_MAY_BEGIN.rawValue) << 1
+    )
+  }
+
   @Test @MainActor
   func managedConfigurationIsValidAndFixed() throws {
     let fileManager = FileManager.default
