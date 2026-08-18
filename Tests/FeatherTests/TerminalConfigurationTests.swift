@@ -46,6 +46,49 @@ struct TerminalConfigurationTests {
     #expect(TerminalRuntimeState.offline.showsNotificationBadge)
   }
 
+  @Test
+  func polledAgentResponsesNotifyOnceUntilTheAgentWorksAgain() {
+    let completed = PolledTerminalRuntimePolicy.decide(
+      reportedState: .running,
+      stateWithoutAttention: .running,
+      agentActivity: .waiting,
+      isSelected: false,
+      responseAcknowledged: false
+    )
+    #expect(completed.state == .attention)
+    #expect(completed.acknowledgement == .keep)
+
+    let opened = PolledTerminalRuntimePolicy.decide(
+      reportedState: .running,
+      stateWithoutAttention: .running,
+      agentActivity: .waiting,
+      isSelected: true,
+      responseAcknowledged: false
+    )
+    #expect(opened.state == .running)
+    #expect(opened.acknowledgement == .record)
+
+    let stillWaiting = PolledTerminalRuntimePolicy.decide(
+      reportedState: .running,
+      stateWithoutAttention: .running,
+      agentActivity: .waiting,
+      isSelected: false,
+      responseAcknowledged: true
+    )
+    #expect(stillWaiting.state == .running)
+    #expect(stillWaiting.acknowledgement == .keep)
+
+    let workingAgain = PolledTerminalRuntimePolicy.decide(
+      reportedState: .running,
+      stateWithoutAttention: .running,
+      agentActivity: .working,
+      isSelected: false,
+      responseAcknowledged: true
+    )
+    #expect(workingAgain.state == .running)
+    #expect(workingAgain.acknowledgement == .clear)
+  }
+
   @Test @MainActor
   func managedConfigurationIsValidAndFixed() throws {
     let fileManager = FileManager.default

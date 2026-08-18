@@ -40,7 +40,7 @@ struct TmuxBackendTests {
     #expect(config.contains("set -g pane-border-style \"fg=colour8\""))
     #expect(config.contains("set -g pane-active-border-style \"fg=colour8\""))
     #expect(config.contains("set -g mouse on"))
-    #expect(config.contains("set-hook -g alert-bell 'wait-for -S feather-state-change'"))
+    #expect(!config.contains("wait-for"))
     let liveMouse = try runner.run(
       tmux.path,
       arguments: ["-L", socketName, "show-options", "-gv", "mouse"]
@@ -188,5 +188,32 @@ struct TmuxBackendTests {
         )
       ]
     #expect(TmuxSessionRuntimeResolver.state(for: "shell", in: multiPane) == .running)
+  }
+
+  @Test
+  func identifiesCurrentAgentsAndTheirResponseActivityFromPaneTitles() {
+    let snapshots = TmuxSessionRuntimeParser.parse(
+      "codex-working\tcodex\t0\t0\t\t⠋ alpha\n"
+        + "codex-waiting\tcodex\t0\t0\t\tdelta\n"
+        + "claude-working\t2.1.234\t0\t0\t\t◑ Annie update\n"
+        + "claude-waiting\t2.1.234\t0\t0\t\t✳ Burger migration\n"
+        + "shell\tzsh\t0\t0\t\tMac.local\n"
+        + "unrelated-version\t2.1.234\t0\t0\t\tordinary task\n"
+    )
+
+    #expect(
+      snapshots.map(\.title) == [
+        "⠋ alpha", "delta", "◑ Annie update", "✳ Burger migration", "Mac.local",
+        "ordinary task",
+      ]
+    )
+    #expect(snapshots.map(\.agentKind) == [.codex, .codex, .claude, .claude, nil, nil])
+    #expect(snapshots.map(\.agentActivity) == [.working, .waiting, .working, .waiting, nil, nil])
+    #expect(
+      TmuxSessionRuntimeResolver.agentKind(for: "claude-working", in: snapshots) == .claude
+    )
+    #expect(
+      TmuxSessionRuntimeResolver.agentActivity(for: "codex-waiting", in: snapshots) == .waiting
+    )
   }
 }

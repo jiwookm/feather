@@ -2,7 +2,6 @@ import Darwin
 import Foundation
 
 public struct TmuxLaunchSpec: Equatable, Sendable {
-  static let stateChangeChannel = "feather-state-change"
   public let executableURL: URL
   public let configURL: URL
   public let socketName: String
@@ -26,19 +25,8 @@ public struct TmuxLaunchSpec: Equatable, Sendable {
     .joined(separator: " ")
   }
 
-  var signalStateChangeCommand: String {
-    [
-      executableURL.path,
-      "-L", socketName,
-      "-f", configURL.path,
-      "wait-for", "-S", Self.stateChangeChannel,
-    ]
-    .map(Self.shellQuote)
-    .joined(separator: " ")
-  }
-
   func markAttentionCommand(sessionID: String) -> String {
-    let mark = [
+    [
       executableURL.path,
       "-L", socketName,
       "-f", configURL.path,
@@ -46,7 +34,6 @@ public struct TmuxLaunchSpec: Equatable, Sendable {
     ]
     .map(Self.shellQuote)
     .joined(separator: " ")
-    return "\(mark); \(signalStateChangeCommand)"
   }
 
   private static func shellQuote(_ value: String) -> String {
@@ -83,8 +70,6 @@ public enum TmuxEnvironment {
       set -g detach-on-destroy on
       set -g pane-border-style "fg=colour8"
       set -g pane-active-border-style "fg=colour8"
-      set-hook -g alert-bell 'wait-for -S feather-state-change'
-      set-hook -g pane-exited 'wait-for -S feather-state-change'
       """
     if (try? String(contentsOf: configURL, encoding: .utf8)) != config {
       try config.write(to: configURL, atomically: true, encoding: .utf8)
@@ -97,8 +82,6 @@ public enum TmuxEnvironment {
         "set-option", "-g", "pane-border-style", "fg=colour8", ";",
         "set-option", "-g", "pane-active-border-style", "fg=colour8",
         ";", "set-window-option", "-g", "monitor-bell", "on",
-        ";", "set-hook", "-g", "alert-bell", "wait-for -S feather-state-change",
-        ";", "set-hook", "-g", "pane-exited", "wait-for -S feather-state-change",
       ],
       allowFailure: true
     )
@@ -131,16 +114,13 @@ public enum TmuxEnvironment {
 public actor TmuxBackend: TerminalBackend {
   private let spec: TmuxLaunchSpec
   private let runner: CommandRunner
-  private let eventRunner: BoundedCommandRunner
 
   public init(
     spec: TmuxLaunchSpec,
-    runner: CommandRunner = CommandRunner(),
-    eventRunner: BoundedCommandRunner = BoundedCommandRunner()
+    runner: CommandRunner = CommandRunner()
   ) {
     self.spec = spec
     self.runner = runner
-    self.eventRunner = eventRunner
   }
 
   public func sessionExists(_ sessionID: String) async throws -> Bool {
@@ -243,7 +223,7 @@ public actor TmuxBackend: TerminalBackend {
     let result = try run(
       [
         "list-panes", "-a", "-f", "#{pane_active}", "-F",
-        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}",
+        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}\t#{pane_title}",
       ],
       allowFailure: true
     )
@@ -257,26 +237,6 @@ public actor TmuxBackend: TerminalBackend {
       allowFailure: true
     )
     _ = try run(["kill-session", "-C", "-t", sessionID], allowFailure: true)
-  }
-
-  public func waitForStateChange() async throws {
-    let output = try await eventRunner.run(
-      spec.executableURL.path,
-      arguments: [
-        "-L", spec.socketName, "-f", spec.configURL.path,
-        "wait-for", TmuxLaunchSpec.stateChangeChannel,
-      ],
-      maximumOutputBytes: 64 * 1_024,
-      timeout: 7 * 24 * 60 * 60
-    )
-    guard output.status == 0 else {
-      throw BoundedCommandFailure(
-        executable: spec.executableURL.path,
-        arguments: ["wait-for", TmuxLaunchSpec.stateChangeChannel],
-        status: output.status,
-        stderr: output.stderrText
-      )
-    }
   }
 
   private func run(_ arguments: [String], allowFailure: Bool = false) throws -> CommandOutput {
@@ -297,7 +257,8 @@ enum TmuxSessionRuntimeParser {
         sessionID: String(fields[0]),
         command: String(fields[1]),
         paneDead: fields[2] == "1",
-        hasBell: fields[3] == "1" || (fields.count >= 5 && fields[4] == "1")
+        hasBell: fields[3] == "1" || (fields.count >= 5 && fields[4] == "1"),
+        title: fields.count >= 6 ? String(fields[5]) : ""
       )
     }
   }

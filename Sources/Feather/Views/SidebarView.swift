@@ -33,6 +33,7 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
       .scrollIndicators(.never)
 
@@ -242,13 +243,11 @@ struct SidebarView: View {
                 .lineLimit(1)
             }
           }
-          .frame(maxWidth: .infinity, alignment: .leading)
           .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .help(repository.path)
-
-        Spacer(minLength: 0)
 
         if !mainAgents.isEmpty {
           AgentSessionBadges(sessions: mainAgents)
@@ -503,10 +502,10 @@ struct SidebarView: View {
   ) -> [AgentSessionPresentation] {
     model.terminals(repositoryID: repositoryID, worktreePath: worktreePath)
       .compactMap { terminal in
-        guard let kind = AgentKind(terminal: terminal) else { return nil }
+        guard let runtimeKind = model.currentAgentKind(for: terminal) else { return nil }
         return AgentSessionPresentation(
           id: terminal.id,
-          kind: kind,
+          kind: AgentKind(runtimeKind: runtimeKind),
           state: model.runtimeState(for: terminal)
         )
       }

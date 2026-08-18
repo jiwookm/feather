@@ -496,17 +496,35 @@ public enum TerminalRuntimeState: String, Equatable, Sendable {
   case offline
 }
 
+public enum TerminalAgentKind: String, Equatable, Sendable {
+  case claude
+  case codex
+}
+
+public enum TerminalAgentActivity: Equatable, Sendable {
+  case working
+  case waiting
+}
+
 public struct TmuxSessionRuntimeSnapshot: Equatable, Sendable {
   public let sessionID: String
   public let command: String
   public let paneDead: Bool
   public let hasBell: Bool
+  public let title: String
 
-  public init(sessionID: String, command: String, paneDead: Bool, hasBell: Bool) {
+  public init(
+    sessionID: String,
+    command: String,
+    paneDead: Bool,
+    hasBell: Bool,
+    title: String = ""
+  ) {
     self.sessionID = sessionID
     self.command = command
     self.paneDead = paneDead
     self.hasBell = hasBell
+    self.title = title
   }
 
   public var state: TerminalRuntimeState {
@@ -516,9 +534,43 @@ public struct TmuxSessionRuntimeSnapshot: Equatable, Sendable {
     return Self.shellCommands.contains(executable) ? .shell : .running
   }
 
+  public var agentKind: TerminalAgentKind? {
+    let executable = URL(fileURLWithPath: command).lastPathComponent.lowercased()
+    if executable == TerminalAgentKind.codex.rawValue { return .codex }
+    if executable == TerminalAgentKind.claude.rawValue { return .claude }
+
+    // Claude changes its process title to the installed semantic version. Its terminal title
+    // retains a Claude-specific activity marker, so the pair remains distinguishable from an
+    // arbitrary version-named process.
+    let versionComponents = executable.split(separator: ".", omittingEmptySubsequences: false)
+    let isSemanticVersion =
+      versionComponents.count >= 3
+      && versionComponents.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
+    if isSemanticVersion, let marker = title.first,
+      Self.claudeWorkingMarkers.contains(marker) || marker == Self.claudeWaitingMarker
+    {
+      return .claude
+    }
+    return nil
+  }
+
+  public var agentActivity: TerminalAgentActivity? {
+    guard let agentKind else { return nil }
+    guard let marker = title.unicodeScalars.first else { return .working }
+    switch agentKind {
+    case .codex:
+      return (0x2800...0x28FF).contains(marker.value) ? .working : .waiting
+    case .claude:
+      if Self.claudeWorkingMarkers.contains(Character(marker)) { return .working }
+      return Character(marker) == Self.claudeWaitingMarker ? .waiting : .working
+    }
+  }
+
   private static let shellCommands: Set<String> = [
     "bash", "dash", "fish", "ksh", "login", "sh", "tcsh", "xonsh", "zsh",
   ]
+  private static let claudeWorkingMarkers: Set<Character> = ["◐", "◑", "◒", "◓"]
+  private static let claudeWaitingMarker: Character = "✳"
 }
 
 public enum TmuxSessionRuntimeResolver {
@@ -533,6 +585,27 @@ public enum TmuxSessionRuntimeResolver {
     in snapshots: [TmuxSessionRuntimeSnapshot]
   ) -> TerminalRuntimeState {
     resolve(snapshots.filter { $0.sessionID == sessionID })
+  }
+
+  public static func agentKind(
+    for sessionID: String,
+    in snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> TerminalAgentKind? {
+    snapshots.lazy
+      .filter { $0.sessionID == sessionID }
+      .compactMap(\.agentKind)
+      .first
+  }
+
+  public static func agentActivity(
+    for sessionID: String,
+    in snapshots: [TmuxSessionRuntimeSnapshot]
+  ) -> TerminalAgentActivity? {
+    let activities = snapshots.lazy
+      .filter { $0.sessionID == sessionID }
+      .compactMap(\.agentActivity)
+    if activities.contains(.working) { return .working }
+    return activities.contains(.waiting) ? .waiting : nil
   }
 
   private static func resolve(

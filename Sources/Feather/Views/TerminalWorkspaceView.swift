@@ -113,9 +113,9 @@ struct TerminalWorkspaceView: View {
     let selected = terminal.id == model.selectedTerminalID
     let runtimeState = model.runtimeState(for: terminal)
     return HStack(spacing: 8) {
-      if let kind = AgentKind(terminal: terminal) {
+      if let runtimeKind = model.currentAgentKind(for: terminal) {
         AgentIcon(
-          kind: kind,
+          kind: AgentKind(runtimeKind: runtimeKind),
           size: 14,
           tint: selected ? palette.primaryText : palette.secondaryText
         )

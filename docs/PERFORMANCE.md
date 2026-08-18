@@ -91,8 +91,11 @@ the before and after command samples each used 20 warm runs:
   candidate measurement.
 - The app was not running in either sample, so no live UI RSS comparison is claimed. Repository
   search owns a subprocess only while its overlay has a two-or-more-character query. Runtime state
-  owns at most one blocked tmux waiter while a local terminal exists. SSH and release tooling do no
-  background work.
+  performs one bounded all-session tmux snapshot every two seconds locally and every six seconds
+  for connected remote workspaces. Release tooling does no background work.
+- A 2026-08-18 sample against ten live local sessions launched the snapshot command 100 times
+  back-to-back: 38.6 ms median, 53.3 ms p95, and 73.0 ms maximum including the benchmark shell's
+  process-launch overhead. The ordinary two-second interval does not run them back-to-back.
 
 ## Feature budgets
 
@@ -127,6 +130,8 @@ the before and after command samples each used 20 warm runs:
   only on selection and keep the existing 1 MB patch ceiling.
 - Resource sampling should remain under 50 ms p95 and run only while Usage is visible; no snapshot,
   peak, or timer survives tab dismissal.
+- The all-session tmux runtime snapshot should remain under 75 ms p95 locally. Exactly one polling
+  task may exist while recorded terminals exist; it must stop when the final terminal is removed.
 
 Measure cold and warm behavior separately when it matters. Do not hide latency in startup or replace
 it with perpetual background work.

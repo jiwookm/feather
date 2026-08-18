@@ -103,7 +103,7 @@ public actor SSHTmuxBackend: TerminalBackend {
     let result = try await run(
       [
         "list-panes", "-a", "-f", "#{pane_active}", "-F",
-        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}",
+        "#{session_name}\t#{pane_current_command}\t#{pane_dead}\t#{window_bell_flag}\t#{@feather-attention}\t#{pane_title}",
       ],
       allowFailure: true
     )

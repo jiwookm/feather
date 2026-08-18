@@ -40,6 +40,52 @@ struct WorktreeCreation: Identifiable {
   let repositoryID: UUID
 }
 
+enum AgentResponseAcknowledgementAction: Equatable {
+  case keep
+  case record
+  case clear
+}
+
+struct PolledTerminalRuntimeDecision: Equatable {
+  let state: TerminalRuntimeState
+  let acknowledgement: AgentResponseAcknowledgementAction
+}
+
+enum PolledTerminalRuntimePolicy {
+  static func decide(
+    reportedState: TerminalRuntimeState,
+    stateWithoutAttention: TerminalRuntimeState,
+    agentActivity: TerminalAgentActivity?,
+    isSelected: Bool,
+    responseAcknowledged: Bool
+  ) -> PolledTerminalRuntimeDecision {
+    if reportedState == .exited {
+      return PolledTerminalRuntimeDecision(state: .exited, acknowledgement: .clear)
+    }
+    if reportedState == .attention, !isSelected {
+      return PolledTerminalRuntimeDecision(state: .attention, acknowledgement: .keep)
+    }
+
+    switch agentActivity {
+    case .working:
+      return PolledTerminalRuntimeDecision(state: .running, acknowledgement: .clear)
+    case .waiting:
+      if isSelected {
+        return PolledTerminalRuntimeDecision(state: .running, acknowledgement: .record)
+      }
+      return PolledTerminalRuntimeDecision(
+        state: responseAcknowledged ? .running : .attention,
+        acknowledgement: .keep
+      )
+    case nil:
+      return PolledTerminalRuntimeDecision(
+        state: reportedState == .attention ? stateWithoutAttention : reportedState,
+        acknowledgement: .clear
+      )
+    }
+  }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
   enum PresentedAlert: Identifiable {
@@ -86,6 +132,8 @@ final class AppModel: ObservableObject {
   @Published private(set) var managedWorktrees: [ManagedWorktreeRecord]
   @Published private(set) var terminals: [TerminalRecord]
   @Published private(set) var terminalRuntimeStates: [UUID: TerminalRuntimeState] = [:]
+  @Published private(set) var terminalRuntimeAgentKinds: [UUID: TerminalAgentKind] = [:]
+  @Published private(set) var observedTerminalRuntimeIDs: Set<UUID> = []
   @Published private(set) var pendingWorktree: WorktreeCreation?
   @Published private(set) var selectedPendingWorktreeID: UUID?
   @Published var selectedRepositoryID: UUID?
@@ -122,6 +170,7 @@ final class AppModel: ObservableObject {
   private let processShutdown: FeatherProcessShutdown
   private var hasStarted = false
   private var terminalMonitorTask: Task<Void, Never>?
+  private var acknowledgedAgentResponses: Set<UUID> = []
 
   init(runtimeIdentity: FeatherRuntimeIdentity = .current) {
     self.runtimeIdentity = runtimeIdentity
@@ -516,6 +565,17 @@ final class AppModel: ObservableObject {
       ?? (AgentKind(terminal: terminal) == nil ? .shell : .running)
   }
 
+  func currentAgentKind(for terminal: TerminalRecord) -> TerminalAgentKind? {
+    if observedTerminalRuntimeIDs.contains(terminal.id) {
+      return terminalRuntimeAgentKinds[terminal.id]
+    }
+    guard let savedKind = AgentKind(terminal: terminal) else { return nil }
+    return switch savedKind {
+    case .claude: .claude
+    case .codex: .codex
+    }
+  }
+
   func terminalSurfaceDidAttach(_ terminal: TerminalRecord) {
     if let workspace = remoteWorkspace(for: terminal) {
       guard remoteWorkspaceRuntimeStates[workspace.id] == .connected else {
@@ -629,6 +689,9 @@ final class AppModel: ObservableObject {
 
   private func addTerminal(_ terminal: TerminalRecord) {
     terminals.append(terminal)
+    observedTerminalRuntimeIDs.remove(terminal.id)
+    terminalRuntimeAgentKinds.removeValue(forKey: terminal.id)
+    acknowledgedAgentResponses.remove(terminal.id)
     terminalRuntimeStates[terminal.id] =
       AgentKind(terminal: terminal) == nil ? .shell : .running
     selectedTerminalID = terminal.id
@@ -1119,6 +1182,9 @@ final class AppModel: ObservableObject {
         for terminal in workspaceTerminals {
           terminalRegistry.release(terminal.id)
           terminalRuntimeStates.removeValue(forKey: terminal.id)
+          terminalRuntimeAgentKinds.removeValue(forKey: terminal.id)
+          observedTerminalRuntimeIDs.remove(terminal.id)
+          acknowledgedAgentResponses.remove(terminal.id)
         }
         let removedTerminalIDs = Set(workspaceTerminals.map(\.id))
         terminals.removeAll { removedTerminalIDs.contains($0.id) }
@@ -1262,6 +1328,9 @@ final class AppModel: ObservableObject {
     terminalRegistry.release(terminal.id)
     terminals.removeAll { $0.id == terminal.id }
     terminalRuntimeStates.removeValue(forKey: terminal.id)
+    terminalRuntimeAgentKinds.removeValue(forKey: terminal.id)
+    observedTerminalRuntimeIDs.remove(terminal.id)
+    acknowledgedAgentResponses.remove(terminal.id)
     if selectedTerminalID == terminal.id {
       selectedTerminalID = selectedWorktreeTerminals.first?.id
     }
@@ -1347,6 +1416,9 @@ final class AppModel: ObservableObject {
     terminals.removeAll { $0.repositoryID == repositoryID }
     for terminal in projectTerminals {
       terminalRuntimeStates.removeValue(forKey: terminal.id)
+      terminalRuntimeAgentKinds.removeValue(forKey: terminal.id)
+      observedTerminalRuntimeIDs.remove(terminal.id)
+      acknowledgedAgentResponses.remove(terminal.id)
     }
     updateTerminalMonitor()
   }
@@ -1460,6 +1532,7 @@ final class AppModel: ObservableObject {
       let terminal = terminals.first(where: { $0.id == terminalID })
     else { return }
 
+    acknowledgedAgentResponses.insert(terminalID)
     terminalRuntimeStates[terminalID] = .running
     switch executionTarget(for: terminal) {
     case .local:
@@ -1493,11 +1566,7 @@ final class AppModel: ObservableObject {
   }
 
   private func updateTerminalMonitor() {
-    let hasLocalTerminal = terminals.contains { terminal in
-      if case .local = executionTarget(for: terminal) { return true }
-      return false
-    }
-    guard hasLocalTerminal, let tmuxBackend else {
+    guard !terminals.isEmpty else {
       terminalMonitorTask?.cancel()
       terminalMonitorTask = nil
       return
@@ -1505,14 +1574,15 @@ final class AppModel: ObservableObject {
     guard terminalMonitorTask == nil else { return }
     terminalMonitorTask = Task { [weak self] in
       guard let self else { return }
-      await refreshLocalTerminalStates()
+      var pollCount = 0
       while !Task.isCancelled {
+        await refreshLocalTerminalStates()
+        if pollCount.isMultiple(of: 3) {
+          await refreshConnectedRemoteTerminalStates()
+        }
+        pollCount += 1
         do {
-          try await tmuxBackend.waitForStateChange()
-          guard !Task.isCancelled else { break }
-          await refreshLocalTerminalStates()
-        } catch is CancellationError {
-          break
+          try await Task.sleep(for: .seconds(2))
         } catch {
           break
         }
@@ -1523,26 +1593,124 @@ final class AppModel: ObservableObject {
 
   private func refreshLocalTerminalStates() async {
     guard let tmuxBackend, let snapshots = try? await tmuxBackend.runtimeSnapshots() else { return }
-    let bySession = TmuxSessionRuntimeResolver.statesBySession(snapshots)
+    let bySession = Dictionary(grouping: snapshots, by: \.sessionID)
     for terminal in terminals {
       guard case .local = executionTarget(for: terminal) else { continue }
-      var state = bySession[terminal.tmuxSessionID] ?? .exited
-      if state == .attention, selectedTerminalID == terminal.id, NSApp.isActive {
-        try? await tmuxBackend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
-        if let command = try? await tmuxBackend.foregroundCommand(terminal.tmuxSessionID) {
-          state =
-            TmuxSessionRuntimeSnapshot(
-              sessionID: terminal.tmuxSessionID,
-              command: command,
-              paneDead: false,
-              hasBell: false
-            ).state
-        } else {
-          state = .exited
-        }
+      guard let sessionSnapshots = bySession[terminal.tmuxSessionID] else {
+        clearRuntimeAgentObservation(for: terminal.id)
+        setTerminalRuntimeState(.exited, for: terminal.id)
+        continue
       }
-      terminalRuntimeStates[terminal.id] = state
+      observeRuntimeAgent(for: terminal.id, in: sessionSnapshots)
+      let isSelected = selectedTerminalID == terminal.id && NSApp.isActive
+      let reportedState = TmuxSessionRuntimeResolver.state(
+        for: terminal.tmuxSessionID,
+        in: sessionSnapshots
+      )
+      if reportedState == .attention, isSelected {
+        try? await tmuxBackend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+      }
+      setTerminalRuntimeState(
+        polledRuntimeState(
+          for: terminal,
+          snapshots: sessionSnapshots,
+          reportedState: reportedState,
+          isSelected: isSelected
+        ),
+        for: terminal.id
+      )
     }
+  }
+
+  private func refreshConnectedRemoteTerminalStates() async {
+    for workspace in remoteWorkspaces
+    where workspace.isRemoteAuthoritative
+      && remoteWorkspaceRuntimeStates[workspace.id] == .connected
+    {
+      do {
+        _ = try await refreshRemoteTerminalStates(in: workspace)
+      } catch {
+        applyRemoteWorkspaceState(.offline, to: workspace)
+      }
+    }
+  }
+
+  private func observeRuntimeAgent(
+    for terminalID: UUID,
+    in snapshots: [TmuxSessionRuntimeSnapshot]
+  ) {
+    let previousKind = terminalRuntimeAgentKinds[terminalID]
+    let kind = snapshots.compactMap(\.agentKind).first
+    let wasObserved = observedTerminalRuntimeIDs.contains(terminalID)
+    if !wasObserved || previousKind != kind {
+      acknowledgedAgentResponses.remove(terminalID)
+    }
+    if !wasObserved {
+      observedTerminalRuntimeIDs.insert(terminalID)
+    }
+    if let kind, previousKind != kind {
+      terminalRuntimeAgentKinds[terminalID] = kind
+    } else if kind == nil, previousKind != nil {
+      terminalRuntimeAgentKinds.removeValue(forKey: terminalID)
+    }
+  }
+
+  private func clearRuntimeAgentObservation(for terminalID: UUID) {
+    if terminalRuntimeAgentKinds[terminalID] != nil {
+      terminalRuntimeAgentKinds.removeValue(forKey: terminalID)
+    }
+    if observedTerminalRuntimeIDs.contains(terminalID) {
+      observedTerminalRuntimeIDs.remove(terminalID)
+    }
+    acknowledgedAgentResponses.remove(terminalID)
+  }
+
+  private func setTerminalRuntimeState(
+    _ state: TerminalRuntimeState,
+    for terminalID: UUID
+  ) {
+    guard terminalRuntimeStates[terminalID] != state else { return }
+    terminalRuntimeStates[terminalID] = state
+  }
+
+  private func polledRuntimeState(
+    for terminal: TerminalRecord,
+    snapshots: [TmuxSessionRuntimeSnapshot],
+    reportedState: TerminalRuntimeState,
+    isSelected: Bool
+  ) -> TerminalRuntimeState {
+    let clearedSnapshots = snapshots.map {
+      TmuxSessionRuntimeSnapshot(
+        sessionID: $0.sessionID,
+        command: $0.command,
+        paneDead: $0.paneDead,
+        hasBell: false,
+        title: $0.title
+      )
+    }
+    let stateWithoutAttention = TmuxSessionRuntimeResolver.state(
+      for: terminal.tmuxSessionID,
+      in: clearedSnapshots
+    )
+    let decision = PolledTerminalRuntimePolicy.decide(
+      reportedState: reportedState,
+      stateWithoutAttention: stateWithoutAttention,
+      agentActivity: TmuxSessionRuntimeResolver.agentActivity(
+        for: terminal.tmuxSessionID,
+        in: snapshots
+      ),
+      isSelected: isSelected,
+      responseAcknowledged: acknowledgedAgentResponses.contains(terminal.id)
+    )
+    switch decision.acknowledgement {
+    case .keep:
+      break
+    case .record:
+      acknowledgedAgentResponses.insert(terminal.id)
+    case .clear:
+      acknowledgedAgentResponses.remove(terminal.id)
+    }
+    return decision.state
   }
 
   private func refreshRemoteWorkspaceStates() async {
@@ -1592,25 +1760,32 @@ final class AppModel: ObservableObject {
 
     let backend = SSHTmuxBackend(remote: workspace.remote)
     let snapshots = try await backend.runtimeSnapshots()
-    let bySession = TmuxSessionRuntimeResolver.statesBySession(snapshots)
+    let bySession = Dictionary(grouping: snapshots, by: \.sessionID)
     for terminal in workspaceTerminals {
       guard terminals.contains(where: { $0.id == terminal.id }) else { continue }
-      var state = bySession[terminal.tmuxSessionID] ?? .exited
-      if state == .attention, selectedTerminalID == terminal.id, NSApp.isActive {
-        try await backend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
-        if let command = try await backend.foregroundCommand(terminal.tmuxSessionID) {
-          state =
-            TmuxSessionRuntimeSnapshot(
-              sessionID: terminal.tmuxSessionID,
-              command: command,
-              paneDead: false,
-              hasBell: false
-            ).state
-        } else {
-          state = .exited
-        }
+      guard let sessionSnapshots = bySession[terminal.tmuxSessionID] else {
+        clearRuntimeAgentObservation(for: terminal.id)
+        setTerminalRuntimeState(.exited, for: terminal.id)
+        continue
       }
-      terminalRuntimeStates[terminal.id] = state
+      observeRuntimeAgent(for: terminal.id, in: sessionSnapshots)
+      let isSelected = selectedTerminalID == terminal.id && NSApp.isActive
+      let reportedState = TmuxSessionRuntimeResolver.state(
+        for: terminal.tmuxSessionID,
+        in: sessionSnapshots
+      )
+      if reportedState == .attention, isSelected {
+        try await backend.acknowledgeAttention(sessionID: terminal.tmuxSessionID)
+      }
+      setTerminalRuntimeState(
+        polledRuntimeState(
+          for: terminal,
+          snapshots: sessionSnapshots,
+          reportedState: reportedState,
+          isSelected: isSelected
+        ),
+        for: terminal.id
+      )
     }
     return snapshots
   }
@@ -1675,6 +1850,7 @@ final class AppModel: ObservableObject {
     guard let terminal = terminals.first(where: { $0.id == terminalID }) else { return }
     switch event {
     case .running:
+      acknowledgedAgentResponses.remove(terminalID)
       terminalRuntimeStates[terminalID] = .running
     case .attention:
       if selectedTerminalID == terminalID, NSApp.isActive {
