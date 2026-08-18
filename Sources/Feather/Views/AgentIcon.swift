@@ -6,6 +6,13 @@ enum AgentKind: String {
   case claude
   case codex
 
+  init(runtimeKind: TerminalAgentKind) {
+    switch runtimeKind {
+    case .claude: self = .claude
+    case .codex: self = .codex
+    }
+  }
+
   init?(terminal: TerminalRecord) {
     switch terminal.title {
     case "Claude": self = .claude
