@@ -23,6 +23,32 @@ enum FeatherGhosttyRequest {
   case closeWindow
 }
 
+enum FeatherGhosttyScrollModifiers {
+  /// Ghostty packs precision into bit 0 and momentum into bits 1...3.
+  static func encode(
+    precision: Bool,
+    momentumPhase: NSEvent.Phase
+  ) -> ghostty_input_scroll_mods_t {
+    var value: ghostty_input_scroll_mods_t = precision ? 1 : 0
+    value |= ghostty_input_scroll_mods_t(momentum(for: momentumPhase).rawValue) << 1
+    return value
+  }
+
+  private static func momentum(
+    for phase: NSEvent.Phase
+  ) -> ghostty_input_mouse_momentum_e {
+    switch phase {
+    case .began: GHOSTTY_MOUSE_MOMENTUM_BEGAN
+    case .stationary: GHOSTTY_MOUSE_MOMENTUM_STATIONARY
+    case .changed: GHOSTTY_MOUSE_MOMENTUM_CHANGED
+    case .ended: GHOSTTY_MOUSE_MOMENTUM_ENDED
+    case .cancelled: GHOSTTY_MOUSE_MOMENTUM_CANCELLED
+    case .mayBegin: GHOSTTY_MOUSE_MOMENTUM_MAY_BEGIN
+    default: GHOSTTY_MOUSE_MOMENTUM_NONE
+    }
+  }
+}
+
 enum FeatherGhosttyAction {
   case hoveredLink(String?)
   case openURL(String?)
@@ -231,7 +257,10 @@ final class FeatherGhosttySession {
       surface,
       event.scrollingDeltaX,
       event.scrollingDeltaY,
-      translateScrollModifiers(event)
+      FeatherGhosttyScrollModifiers.encode(
+        precision: event.hasPreciseScrollingDeltas,
+        momentumPhase: event.momentumPhase
+      )
     )
   }
 
@@ -444,26 +473,6 @@ final class FeatherGhosttySession {
     if flags.contains(.command) { raw |= UInt32(GHOSTTY_MODS_SUPER.rawValue) }
     if flags.contains(.capsLock) { raw |= UInt32(GHOSTTY_MODS_CAPS.rawValue) }
     return ghostty_input_mods_e(raw)
-  }
-
-  private func translateScrollModifiers(_ event: NSEvent) -> ghostty_input_scroll_mods_t {
-    var value = ghostty_input_scroll_mods_t(translateModifiers(event.modifierFlags).rawValue)
-    switch event.momentumPhase {
-    case .began:
-      value |= ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_BEGAN.rawValue << 16)
-    case .changed:
-      value |= ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_CHANGED.rawValue << 16)
-    case .ended:
-      value |= ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_ENDED.rawValue << 16)
-    case .cancelled:
-      value |= ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_CANCELLED.rawValue << 16)
-    case .mayBegin:
-      value |= ghostty_input_scroll_mods_t(GHOSTTY_MOUSE_MOMENTUM_MAY_BEGIN.rawValue << 16)
-    default:
-      break
-    }
-    if event.hasPreciseScrollingDeltas { value |= 1 << 24 }
-    return value
   }
 }
 
