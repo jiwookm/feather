@@ -104,7 +104,7 @@ struct TerminalConfigurationTests {
   }
 
   @Test @MainActor
-  func ghosttyKeepsTheNewSurfaceAttachedWhenSwitchingTerminals() async throws {
+  func repeatedTerminalSwitchesDisposeOldSurfacesAndClients() async throws {
     guard let tmux = TmuxEnvironment.locateExecutable() else { return }
 
     let fileManager = FileManager.default
@@ -145,61 +145,96 @@ struct TerminalConfigurationTests {
     try await backend.ensureSession(second.tmuxSessionID, workingDirectory: temporaryRoot.path)
 
     let registry = TerminalRegistry(applicationSupportURL: temporaryRoot, launchSpec: spec)
-    var firstHandle = registry.handle(for: first, appearance: .dark)
-    #expect(firstHandle != nil)
-    firstHandle?.view.frame.size = CGSize(width: 640, height: 480)
-    let firstSurface = try #require(firstHandle?.session.surface)
-    ghostty_surface_set_size(firstSurface, 1, 1)
-    firstHandle?.view.layer?.contentsScale = 99
-    firstHandle?.view.handlers?.updateContentScale()
-    let correctedSize = ghostty_surface_size(firstSurface)
-    #expect(correctedSize.width_px > 1)
-    #expect(correctedSize.height_px > 1)
-    let expectedScale =
-      firstHandle?.view.window?.backingScaleFactor
-      ?? NSScreen.main?.backingScaleFactor
-      ?? 2
-    #expect(firstHandle?.view.layer?.contentsScale == expectedScale)
+    let terminals = [first, second]
+    var retainedHandles: [TerminalHandle] = []
 
-    ghostty_surface_set_size(firstSurface, 1, 1)
-    firstHandle?.view.handlers?.displayChanged(nil)
-    let screenChangeCorrectedSize = ghostty_surface_size(firstSurface)
-    #expect(screenChangeCorrectedSize.width_px > 1)
-    #expect(screenChangeCorrectedSize.height_px > 1)
+    for switchIndex in 0..<12 {
+      let terminal = terminals[switchIndex % terminals.count]
+      let handle = try #require(registry.handle(for: terminal, appearance: .dark))
+      handle.view.frame.size = CGSize(width: 640, height: 480)
+      retainedHandles.append(handle)
 
-    var clients = ""
-    for _ in 0..<100 where !clients.contains(first.tmuxSessionID) {
-      try await Task.sleep(for: .milliseconds(20))
-      clients = try runner.run(
-        tmux.path,
-        arguments: ["-L", socketName, "list-clients", "-F", "#{client_session}"],
-        allowFailure: true
-      ).text
+      if switchIndex == 0 {
+        let surface = try #require(handle.session.surface)
+        ghostty_surface_set_size(surface, 1, 1)
+        handle.view.layer?.contentsScale = 99
+        handle.view.handlers?.updateContentScale()
+        let correctedSize = ghostty_surface_size(surface)
+        #expect(correctedSize.width_px > 1)
+        #expect(correctedSize.height_px > 1)
+        let expectedScale =
+          handle.view.window?.backingScaleFactor
+          ?? NSScreen.main?.backingScaleFactor
+          ?? 2
+        #expect(handle.view.layer?.contentsScale == expectedScale)
+
+        ghostty_surface_set_size(surface, 1, 1)
+        handle.view.handlers?.displayChanged(nil)
+        let screenChangeCorrectedSize = ghostty_surface_size(surface)
+        #expect(screenChangeCorrectedSize.width_px > 1)
+        #expect(screenChangeCorrectedSize.height_px > 1)
+      }
+
+      let attachedClients = try await waitForTmuxClients(
+        [terminal.tmuxSessionID],
+        executable: tmux.path,
+        socketName: socketName,
+        runner: runner
+      )
+      #expect(attachedClients == [terminal.tmuxSessionID])
+
+      guard switchIndex < 11 else { continue }
+      registry.release(terminal.id)
+      handle.dispose()
+      #expect(handle.isDisposed)
+      #expect(handle.session.surface == nil)
+      #expect(handle.view.handlers == nil)
+      #expect(handle.host.app == nil)
+      #expect(handle.host.config == nil)
+      let detachedClients = try await waitForTmuxClients(
+        [],
+        executable: tmux.path,
+        socketName: socketName,
+        runner: runner
+      )
+      #expect(detachedClients.isEmpty)
     }
-    #expect(clients.contains(first.tmuxSessionID))
 
-    let secondHandle = try #require(registry.handle(for: second, appearance: .dark))
-    secondHandle.view.frame.size = CGSize(width: 640, height: 480)
-    for _ in 0..<100 where !clients.contains(second.tmuxSessionID) {
-      try await Task.sleep(for: .milliseconds(20))
-      clients = try runner.run(
-        tmux.path,
-        arguments: ["-L", socketName, "list-clients", "-F", "#{client_session}"],
-        allowFailure: true
-      ).text
-    }
-    #expect(clients.contains(second.tmuxSessionID))
-
-    registry.release(first.id)
-    firstHandle = nil
-    try await Task.sleep(for: .milliseconds(50))
-    clients = try runner.run(
-      tmux.path,
-      arguments: ["-L", socketName, "list-clients", "-F", "#{client_session}"],
-      allowFailure: true
-    ).text
-    #expect(clients.contains(second.tmuxSessionID))
+    #expect(retainedHandles.compactMap { $0.session.surface }.count == 1)
+    #expect(retainedHandles.compactMap { $0.host.app }.count == 1)
     #expect(try await backend.sessionExists(first.tmuxSessionID))
-    _ = secondHandle
+    #expect(try await backend.sessionExists(second.tmuxSessionID))
+
+    registry.release(second.id)
+    let detachedClients = try await waitForTmuxClients(
+      [],
+      executable: tmux.path,
+      socketName: socketName,
+      runner: runner
+    )
+    #expect(detachedClients.isEmpty)
+  }
+
+  private func waitForTmuxClients(
+    _ expected: [String],
+    executable: String,
+    socketName: String,
+    runner: CommandRunner
+  ) async throws -> [String] {
+    var clients: [String] = []
+    for _ in 0..<100 {
+      let output = try runner.run(
+        executable,
+        arguments: ["-L", socketName, "list-clients", "-F", "#{client_session}"],
+        allowFailure: true
+      )
+      clients =
+        output.status == 0
+        ? output.text.split(whereSeparator: \.isNewline).map(String.init)
+        : []
+      if clients == expected { return clients }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    return clients
   }
 }

@@ -18,10 +18,24 @@ extension Notification.Name {
 }
 
 @MainActor
-struct TerminalHandle {
+final class TerminalHandle {
   let host: ManagedGhosttyHost
   let session: GhosttyTerminalSession
   let view: GhosttyTerminalView
+  private(set) var isDisposed = false
+
+  init(host: ManagedGhosttyHost, session: GhosttyTerminalSession, view: GhosttyTerminalView) {
+    self.host = host
+    self.session = session
+    self.view = view
+  }
+
+  func dispose() {
+    guard !isDisposed else { return }
+    isDisposed = true
+    session.dispose()
+    host.dispose()
+  }
 }
 
 enum TerminalSurfaceRuntimeEvent: Equatable {
@@ -169,9 +183,7 @@ final class TerminalRegistry {
   /// This keeps Feather at one live Metal surface per visible terminal workspace.
   func release(_ terminalID: UUID) {
     guard let handle = handles.removeValue(forKey: terminalID) else { return }
-    handle.session.actionHandler = nil
-    handle.session.closeHandler = nil
-    handle.session.requestHandler = nil
+    handle.dispose()
   }
 
   func updateAppearance(_ appearance: AppearancePreference) {
