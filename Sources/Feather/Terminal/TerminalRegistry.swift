@@ -13,6 +13,8 @@ extension Notification.Name {
   static let featherQuickOpenRequested = Notification.Name("FeatherQuickOpenRequested")
   static let featherRepositorySearchRequested = Notification.Name(
     "FeatherRepositorySearchRequested")
+  static let featherWorkspaceShortcutRequested = Notification.Name(
+    "FeatherWorkspaceShortcutRequested")
 }
 
 @MainActor

@@ -100,6 +100,11 @@ struct RootView: View {
         quickOpenVisible = false
         repositorySearchVisible.toggle()
       }
+      .onReceive(NotificationCenter.default.publisher(for: .featherWorkspaceShortcutRequested)) {
+        notification in
+        guard let index = notification.userInfo?["index"] as? Int else { return }
+        model.selectWorkspaceShortcut(at: index)
+      }
   }
 
   private var windowAwareWorkspace: some View {
