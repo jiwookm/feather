@@ -1,10 +1,5 @@
 Feather includes the following third-party software.
 
-GhosttyKit
-Copyright (c) 2026 Brianna Zamora
-https://github.com/briannadoubt/GhosttyKit
-Licensed under the MIT License reproduced below.
-
 Ghostty
 Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors
 https://github.com/ghostty-org/ghostty

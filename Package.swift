@@ -11,13 +11,11 @@ let package = Package(
     .executable(name: "Feather", targets: ["Feather"]),
     .library(name: "FeatherCore", targets: ["FeatherCore"]),
   ],
-  dependencies: [
-    .package(
-      url: "https://github.com/jiwookm/GhosttyKit.git",
-      revision: "ea2889264d3586dab2482e17e093e34a77d1b027"
-    )
-  ],
   targets: [
+    .binaryTarget(
+      name: "LibGhostty",
+      path: "Vendor/LibGhostty.xcframework"
+    ),
     .target(
       name: "FeatherCore"
     ),
@@ -25,11 +23,17 @@ let package = Package(
       name: "Feather",
       dependencies: [
         "FeatherCore",
-        .product(name: "GhosttyKit", package: "GhosttyKit"),
+        "LibGhostty",
       ],
       linkerSettings: [
         .linkedFramework("AppKit"),
+        .linkedFramework("Carbon"),
+        .linkedFramework("CoreGraphics"),
+        .linkedFramework("CoreText"),
+        .linkedFramework("IOSurface"),
+        .linkedFramework("Metal"),
         .linkedFramework("SwiftUI"),
+        .linkedLibrary("c++"),
       ]
     ),
     .testTarget(
@@ -40,7 +44,7 @@ let package = Package(
       name: "FeatherTests",
       dependencies: [
         "Feather",
-        .product(name: "GhosttyKit", package: "GhosttyKit"),
+        "LibGhostty",
       ]
     ),
   ],

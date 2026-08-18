@@ -1,0 +1,12 @@
+upstream = https://github.com/ghostty-org/ghostty
+tag = v1.3.1
+commit = 332b2aefc6e72d363aa93ab6ecfc86eeeeb5ed28
+zig = 0.15.2
+target = aarch64-macos.15.0
+optimization = ReleaseFast
+sentry = false
+i18n = false
+archive = link-closed from the first-party native XCFramework build
+library_sha256 = 5c03ebbe5d5928e7f1710c96b91c7cb413513d976011a9149a684b20cf6d02dc
+ghostty_h_sha256 = a619c107e9ab8841f71f91d06bf2bcea7b7c64bf6df252b151812cb932ac9b61
+modulemap_sha256 = e50eb8a5b01122980613a6dd5cd8c9274468e0be929f38d3fd4524f352e99e86
