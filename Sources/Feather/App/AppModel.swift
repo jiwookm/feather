@@ -40,6 +40,50 @@ struct WorktreeCreation: Identifiable {
   let repositoryID: UUID
 }
 
+struct WorkspaceShortcutTarget: Equatable, Identifiable {
+  let repositoryID: UUID
+  let repositoryName: String
+  let worktreePath: String
+  let worktreeName: String
+
+  var id: String { "\(repositoryID.uuidString):\(worktreePath)" }
+}
+
+enum WorkspaceShortcuts {
+  static let maximumCount = 9
+
+  static func index(for key: String) -> Int? {
+    guard key.count == 1, let number = Int(key), (1...maximumCount).contains(number) else {
+      return nil
+    }
+    return number - 1
+  }
+
+  static func targets(
+    repositories: [RepositoryRecord],
+    worktreesFor: (RepositoryRecord) -> [GitWorktree]
+  ) -> [WorkspaceShortcutTarget] {
+    var targets: [WorkspaceShortcutTarget] = []
+    targets.reserveCapacity(maximumCount)
+
+    for repository in repositories {
+      for worktree in worktreesFor(repository) {
+        targets.append(
+          WorkspaceShortcutTarget(
+            repositoryID: repository.id,
+            repositoryName: repository.displayName,
+            worktreePath: worktree.path,
+            worktreeName: worktree.branchDisplayName ?? worktree.displayName
+          )
+        )
+        if targets.count == maximumCount { return targets }
+      }
+    }
+
+    return targets
+  }
+}
+
 enum AgentResponseAcknowledgementAction: Equatable {
   case keep
   case record
@@ -339,6 +383,13 @@ final class AppModel: ObservableObject {
       }
   }
 
+  var workspaceShortcutTargets: [WorkspaceShortcutTarget] {
+    WorkspaceShortcuts.targets(
+      repositories: repositories,
+      worktreesFor: { projectWorktrees(for: $0) }
+    )
+  }
+
   func externalWorktrees(for repository: RepositoryRecord) -> [GitWorktree] {
     let managedPaths = Set(projectWorktrees(for: repository).map(\.path))
     return (worktreesByRepository[repository.id] ?? []).filter {
@@ -537,6 +588,12 @@ final class AppModel: ObservableObject {
     acknowledgeAttentionIfNeeded(selectedTerminalID)
     refreshSelectedRemoteTerminalStatesIfNeeded()
     persist()
+  }
+
+  func selectWorkspaceShortcut(at index: Int) {
+    guard workspaceShortcutTargets.indices.contains(index) else { return }
+    let target = workspaceShortcutTargets[index]
+    selectWorktree(repositoryID: target.repositoryID, path: target.worktreePath)
   }
 
   func selectPendingWorktree(_ id: UUID) {

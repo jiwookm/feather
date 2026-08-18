@@ -59,6 +59,19 @@ struct FeatherApp: App {
         .disabled(
           model.selectedWorktree == nil || model.selectedAuthoritativeRemoteWorkspace != nil
         )
+        if !model.workspaceShortcutTargets.isEmpty {
+          Divider()
+          ForEach(Array(model.workspaceShortcutTargets.enumerated()), id: \.element.id) {
+            index, target in
+            Button("\(target.worktreeName) — \(target.repositoryName)") {
+              model.selectWorkspaceShortcut(at: index)
+            }
+            .keyboardShortcut(
+              KeyEquivalent(Character(String(index + 1))),
+              modifiers: .command
+            )
+          }
+        }
       }
       CommandGroup(replacing: .saveItem) {
         Button("Save File") {
@@ -146,6 +159,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let key = event.charactersIgnoringModifiers?.lowercased(),
         NSApp.keyWindow === FeatherWindow.workspace
       else { return event }
+
+      if let index = WorkspaceShortcuts.index(for: key) {
+        NotificationCenter.default.post(
+          name: .featherWorkspaceShortcutRequested,
+          object: nil,
+          userInfo: ["index": index]
+        )
+        return nil
+      }
 
       let notification: Notification.Name
       switch key {
