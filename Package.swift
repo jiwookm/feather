@@ -13,8 +13,8 @@ let package = Package(
   ],
   dependencies: [
     .package(
-      url: "https://github.com/briannadoubt/GhosttyKit.git",
-      revision: "f3756807a61a42dba3dc1d866a1fd865f1ddfe21"
+      url: "https://github.com/jiwookm/GhosttyKit.git",
+      revision: "ea2889264d3586dab2482e17e093e34a77d1b027"
     )
   ],
   targets: [

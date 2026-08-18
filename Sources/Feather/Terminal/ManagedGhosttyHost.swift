@@ -93,13 +93,25 @@ final class ManagedGhosttyHost: GhosttyTerminalHostProtocol {
   }
 
   deinit {
+    disposeResources()
+  }
+
+  func dispose() {
+    sessions.removeAll()
+    disposeResources()
+  }
+
+  nonisolated private func disposeResources() {
     for observer in observers {
       NotificationCenter.default.removeObserver(observer)
     }
+    observers.removeAll()
     if let app {
+      self.app = nil
       ghostty_app_free(app)
     }
     if let config {
+      self.config = nil
       ghostty_config_free(config)
     }
   }

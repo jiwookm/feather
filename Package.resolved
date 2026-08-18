@@ -1,12 +1,12 @@
 {
-  "originHash" : "1ad07b4a29d64f14a2ba054558e10b79afd3f0aa806d7f14875f65ba251158c8",
+  "originHash" : "d3b712a8b7fc3d2c6f96bea3ab5293b82222a57bc9fc403a7ceee9c25d71d08a",
   "pins" : [
     {
       "identity" : "ghosttykit",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/briannadoubt/GhosttyKit.git",
+      "location" : "https://github.com/jiwookm/GhosttyKit.git",
       "state" : {
-        "revision" : "f3756807a61a42dba3dc1d866a1fd865f1ddfe21"
+        "revision" : "ea2889264d3586dab2482e17e093e34a77d1b027"
       }
     }
   ],
