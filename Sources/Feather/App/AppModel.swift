@@ -136,7 +136,7 @@ final class AppModel: ObservableObject {
     case error(String)
     case closeTerminal(TerminalRecord, String)
     case closePane(TerminalRecord, TerminalPaneState)
-    case removeWorktree(RepositoryRecord, GitWorktree)
+    case removeWorktree(RepositoryRecord, GitWorktree, activeTerminalCount: Int)
     case returnWorktree(RepositoryRecord, GitWorktree)
     case runWorkspaceRemotely(
       RepositoryRecord,
@@ -158,7 +158,7 @@ final class AppModel: ObservableObject {
       case .error(let message): "error-\(message)"
       case .closeTerminal(let terminal, _): "terminal-\(terminal.id)"
       case .closePane(_, let pane): "pane-\(pane.id)"
-      case .removeWorktree(_, let worktree): "worktree-\(worktree.path)"
+      case .removeWorktree(_, let worktree, _): "worktree-\(worktree.path)"
       case .returnWorktree(_, let worktree): "return-\(worktree.path)"
       case .runWorkspaceRemotely(let repository, let worktree, _, _):
         "remote-workspace-\(repository.id)-\(worktree.path)"
@@ -827,13 +827,6 @@ final class AppModel: ObservableObject {
       presentedAlert = .error(FeatherError.unmanagedWorktreeRemoval.localizedDescription)
       return
     }
-    let activeCount = terminals.filter {
-      $0.repositoryID == repository.id && $0.worktreePath == worktree.path
-    }.count
-    guard activeCount == 0 else {
-      presentedAlert = .error(FeatherError.activeTerminals(activeCount).localizedDescription)
-      return
-    }
     guard repository.path != worktree.path else {
       presentedAlert = .error(FeatherError.mainWorktreeRemoval.localizedDescription)
       return
@@ -843,28 +836,65 @@ final class AppModel: ObservableObject {
         guard try await gitService.isClean(worktreePath: worktree.path) else {
           throw FeatherError.dirtyWorktree(worktree.path)
         }
-        presentedAlert = .removeWorktree(repository, worktree)
+        let activeTerminalCount = terminals.count {
+          $0.repositoryID == repository.id && $0.worktreePath == worktree.path
+        }
+        presentedAlert = .removeWorktree(
+          repository,
+          worktree,
+          activeTerminalCount: activeTerminalCount
+        )
       } catch {
         show(error)
       }
     }
   }
 
-  func confirmRemoveWorktree(repository: RepositoryRecord, worktree: GitWorktree) {
+  func confirmRemoveWorktree(
+    repository: RepositoryRecord,
+    worktree: GitWorktree,
+    stopActiveTerminals: Bool
+  ) {
     Task {
       isBusy = true
       defer { isBusy = false }
+      let visibleWorktrees = worktreesByRepository[repository.id]
       do {
+        let activeTerminalCount = terminals.count {
+          $0.repositoryID == repository.id && $0.worktreePath == worktree.path
+        }
+        if activeTerminalCount > 0 {
+          guard stopActiveTerminals else {
+            presentedAlert = .removeWorktree(
+              repository,
+              worktree,
+              activeTerminalCount: activeTerminalCount
+            )
+            return
+          }
+        }
+
+        worktreesByRepository[repository.id]?.removeAll { $0.path == worktree.path }
+        reconcileSelection()
+
+        if activeTerminalCount > 0 {
+          try await terminateTerminals(
+            repositoryID: repository.id,
+            worktreePath: worktree.path
+          )
+        }
         try await gitService.removeWorktree(
           repositoryPath: repository.path,
           worktreePath: worktree.path
         )
-        worktreesByRepository[repository.id]?.removeAll { $0.path == worktree.path }
         managedWorktrees.removeAll {
           $0.repositoryID == repository.id && $0.path == worktree.path
         }
         reconcileSelection()
       } catch {
+        worktreesByRepository[repository.id] =
+          (try? await gitService.listWorktrees(repositoryPath: repository.path)) ?? visibleWorktrees
+        reconcileSelection()
         show(error)
       }
     }
@@ -1461,8 +1491,11 @@ final class AppModel: ObservableObject {
     }
   }
 
-  private func terminateTerminals(repositoryID: UUID) async throws {
-    let projectTerminals = terminals.filter { $0.repositoryID == repositoryID }
+  private func terminateTerminals(repositoryID: UUID, worktreePath: String? = nil) async throws {
+    let projectTerminals = terminals.filter {
+      $0.repositoryID == repositoryID
+        && (worktreePath == nil || $0.worktreePath == worktreePath)
+    }
     for terminal in projectTerminals {
       guard let backend = terminalBackend(for: terminal) else {
         throw FeatherError.tmuxUnavailable
@@ -1470,7 +1503,8 @@ final class AppModel: ObservableObject {
       try await backend.killSession(terminal.tmuxSessionID)
       terminalRegistry.release(terminal.id)
     }
-    terminals.removeAll { $0.repositoryID == repositoryID }
+    let terminatedIDs = Set(projectTerminals.map(\.id))
+    terminals.removeAll { terminatedIDs.contains($0.id) }
     for terminal in projectTerminals {
       terminalRuntimeStates.removeValue(forKey: terminal.id)
       terminalRuntimeAgentKinds.removeValue(forKey: terminal.id)

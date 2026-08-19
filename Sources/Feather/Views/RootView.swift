@@ -257,12 +257,24 @@ struct RootView: View {
         },
         secondaryButton: .cancel()
       )
-    case .removeWorktree(let repository, let worktree):
+    case .removeWorktree(let repository, let worktree, let activeTerminalCount):
       Alert(
         title: Text("Remove \(worktree.displayName)?"),
-        message: Text("The clean checkout will be removed. Its Git branch will be kept."),
-        primaryButton: .destructive(Text("Remove Worktree")) {
-          model.confirmRemoveWorktree(repository: repository, worktree: worktree)
+        message: Text(
+          activeTerminalCount == 0
+            ? "The clean checkout will be removed. Its Git branch will be kept."
+            : "Feather will stop all processes in the \(activeTerminalCount) terminal"
+              + "\(activeTerminalCount == 1 ? "" : "s") for this worktree, then remove the "
+              + "clean checkout. Its Git branch will be kept."
+        ),
+        primaryButton: .destructive(
+          Text(activeTerminalCount == 0 ? "Remove Worktree" : "Stop All Processes and Remove")
+        ) {
+          model.confirmRemoveWorktree(
+            repository: repository,
+            worktree: worktree,
+            stopActiveTerminals: activeTerminalCount > 0
+          )
         },
         secondaryButton: .cancel()
       )
