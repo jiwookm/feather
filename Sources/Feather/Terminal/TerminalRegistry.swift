@@ -270,7 +270,7 @@ enum FeatherGhosttyConfiguration {
       cursor-style-blink = true
       cursor-opacity = 1
       mouse-hide-while-typing = false
-      mouse-scroll-multiplier = precision:0.35,discrete:3
+      mouse-scroll-multiplier = precision:0.525,discrete:3
       copy-on-select = false
       shell-integration = none
       keybind = super+,=unbind
