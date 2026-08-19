@@ -136,7 +136,7 @@ struct TerminalConfigurationTests {
     #expect(configText.contains("cursor-style = bar"))
     #expect(configText.contains("cursor-style-blink = true"))
     #expect(configText.contains("mouse-hide-while-typing = false"))
-    #expect(configText.contains("mouse-scroll-multiplier = precision:0.35,discrete:3"))
+    #expect(configText.contains("mouse-scroll-multiplier = precision:0.525,discrete:3"))
     #expect(configText.contains("background-opacity = 1"))
     #expect(configText.contains("keybind = super+w=unbind"))
     #expect(configText.contains("keybind = super+d=unbind"))
