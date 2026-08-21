@@ -71,6 +71,27 @@ struct FeatherGhosttyConfigDiagnostic {
   let message: String
 }
 
+enum FeatherGhosttyLinkTarget {
+  static func resolve(_ value: String, workingDirectory: String) -> URL? {
+    guard !value.isEmpty else { return nil }
+
+    if value.hasPrefix("/") {
+      return URL(fileURLWithPath: value).standardizedFileURL
+    }
+    if value == "~" || value.hasPrefix("~/") {
+      return URL(fileURLWithPath: NSString(string: value).expandingTildeInPath).standardizedFileURL
+    }
+    if let url = URL(string: value), url.scheme != nil {
+      return url
+    }
+
+    return URL(
+      fileURLWithPath: value,
+      relativeTo: URL(fileURLWithPath: workingDirectory, isDirectory: true)
+    ).standardizedFileURL
+  }
+}
+
 @MainActor
 final class FeatherGhosttySession {
   let host: ManagedGhosttyHost
@@ -285,7 +306,13 @@ final class FeatherGhosttySession {
   }
 
   func openHoveredLink() {
-    guard let hoveredLinkURL, let url = URL(string: hoveredLinkURL) else { return }
+    guard
+      let hoveredLinkURL,
+      let url = FeatherGhosttyLinkTarget.resolve(
+        hoveredLinkURL,
+        workingDirectory: workingDirectory
+      )
+    else { return }
     NSWorkspace.shared.open(url)
   }
 
@@ -325,7 +352,9 @@ final class FeatherGhosttySession {
       hoveredLinkURL = url
       handled = true
     case .openURL(let value):
-      if let value, let url = URL(string: value) {
+      if let value,
+        let url = FeatherGhosttyLinkTarget.resolve(value, workingDirectory: workingDirectory)
+      {
         NSWorkspace.shared.open(url)
         handled = true
       } else {
