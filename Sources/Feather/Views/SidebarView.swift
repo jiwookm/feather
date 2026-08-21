@@ -33,7 +33,7 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 12)
-        .containerRelativeFrame(.horizontal, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
       .scrollIndicators(.never)
 

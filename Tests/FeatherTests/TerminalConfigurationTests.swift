@@ -111,6 +111,36 @@ struct TerminalConfigurationTests {
     )
   }
 
+  @Test
+  func terminalLinksResolveWebURLsAndLocalFilePaths() {
+    let workingDirectory = "/tmp/feather-worktree"
+
+    #expect(
+      FeatherGhosttyLinkTarget.resolve(
+        "https://example.com/docs",
+        workingDirectory: workingDirectory
+      )
+        == URL(string: "https://example.com/docs")
+    )
+    #expect(
+      FeatherGhosttyLinkTarget.resolve("file:///tmp/abc.html", workingDirectory: workingDirectory)
+        == URL(fileURLWithPath: "/tmp/abc.html")
+    )
+    #expect(
+      FeatherGhosttyLinkTarget.resolve("/tmp/abc.html", workingDirectory: workingDirectory)
+        == URL(fileURLWithPath: "/tmp/abc.html")
+    )
+    #expect(
+      FeatherGhosttyLinkTarget.resolve("docs/index.html", workingDirectory: workingDirectory)
+        == URL(fileURLWithPath: "/tmp/feather-worktree/docs/index.html")
+    )
+    #expect(
+      FeatherGhosttyLinkTarget.resolve("~/notes.html", workingDirectory: workingDirectory)
+        == URL(fileURLWithPath: NSString(string: "~/notes.html").expandingTildeInPath)
+    )
+    #expect(FeatherGhosttyLinkTarget.resolve("", workingDirectory: workingDirectory) == nil)
+  }
+
   @Test @MainActor
   func managedConfigurationIsValidAndFixed() throws {
     let fileManager = FileManager.default
