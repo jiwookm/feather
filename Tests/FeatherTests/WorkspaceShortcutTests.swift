@@ -49,4 +49,23 @@ struct WorkspaceShortcutTests {
     #expect(targets[4].repositoryID == secondRepository.id)
     #expect(targets.last?.worktreePath == "/worktrees/second/5")
   }
+
+  @Test
+  func targetsUseSidebarDisplayNameOverride() throws {
+    let repository = RepositoryRecord(path: "/projects/first", displayName: "First")
+    let worktree = GitWorktree(
+      path: "/worktrees/first/agent-name",
+      branch: "refs/heads/agent-name"
+    )
+
+    let target = try #require(
+      WorkspaceShortcuts.targets(
+        repositories: [repository],
+        worktreesFor: { _ in [worktree] },
+        displayName: { _, _ in "My convenient name" }
+      ).first
+    )
+
+    #expect(target.worktreeName == "My convenient name")
+  }
 }

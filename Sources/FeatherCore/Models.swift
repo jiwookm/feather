@@ -142,6 +142,33 @@ public struct ManagedWorktreeRecord: Codable, Equatable, Sendable {
   }
 }
 
+public enum WorktreeSidebarPlacement: String, Codable, Sendable {
+  case active
+  case backlog
+}
+
+public struct WorktreeSidebarRecord: Codable, Equatable, Sendable {
+  public let repositoryID: UUID
+  public let path: String
+  public var displayNameOverride: String?
+  public var placement: WorktreeSidebarPlacement
+  public var order: Int
+
+  public init(
+    repositoryID: UUID,
+    path: String,
+    displayNameOverride: String? = nil,
+    placement: WorktreeSidebarPlacement = .active,
+    order: Int = 0
+  ) {
+    self.repositoryID = repositoryID
+    self.path = path
+    self.displayNameOverride = displayNameOverride
+    self.placement = placement
+    self.order = order
+  }
+}
+
 public struct GitWorktree: Equatable, Identifiable, Sendable {
   public var id: String { path }
   public let path: String
@@ -667,11 +694,12 @@ public protocol TerminalBackend: Actor {
 }
 
 public struct ApplicationSnapshot: Codable, Equatable, Sendable {
-  public static let currentVersion = 8
+  public static let currentVersion = 9
 
   public var version: Int
   public var repositories: [RepositoryRecord]
   public var managedWorktrees: [ManagedWorktreeRecord]
+  public var worktreeSidebarRecords: [WorktreeSidebarRecord]
   public var terminals: [TerminalRecord]
   public var appearance: AppearancePreference
   public var selectedRepositoryID: UUID?
@@ -688,6 +716,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     version: Int = ApplicationSnapshot.currentVersion,
     repositories: [RepositoryRecord] = [],
     managedWorktrees: [ManagedWorktreeRecord] = [],
+    worktreeSidebarRecords: [WorktreeSidebarRecord] = [],
     terminals: [TerminalRecord] = [],
     appearance: AppearancePreference = .system,
     selectedRepositoryID: UUID? = nil,
@@ -723,6 +752,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     self.version = version
     self.repositories = repositories
     self.managedWorktrees = managedWorktrees
+    self.worktreeSidebarRecords = worktreeSidebarRecords
     self.terminals = normalized.terminals
     self.appearance = appearance
     self.selectedRepositoryID = selectedRepositoryID
@@ -741,6 +771,7 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
     case version
     case repositories
     case managedWorktrees
+    case worktreeSidebarRecords
     case terminals
     case appearance
     case selectedRepositoryID
@@ -768,6 +799,10 @@ public struct ApplicationSnapshot: Codable, Equatable, Sendable {
       managedWorktrees: try container.decodeIfPresent(
         [ManagedWorktreeRecord].self,
         forKey: .managedWorktrees
+      ) ?? [],
+      worktreeSidebarRecords: try container.decodeIfPresent(
+        [WorktreeSidebarRecord].self,
+        forKey: .worktreeSidebarRecords
       ) ?? [],
       terminals: try container.decodeIfPresent([TerminalRecord].self, forKey: .terminals) ?? [],
       appearance: try container.decodeIfPresent(

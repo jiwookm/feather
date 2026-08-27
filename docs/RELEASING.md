@@ -7,6 +7,12 @@ Tags shaped like `v0.1.0` run the release workflow. The tag must match
 `CFBundleShortVersionString` in `Resources/Info.plist`. A successful run publishes a versioned arm64
 DMG and SHA-256 checksum to the repository's public GitHub Releases page.
 
+Every release also signs its archive and appcast with Sparkle Ed25519 and replaces the
+`appcast.xml` asset on the dedicated `updater-feed` prerelease. Installed copies use that stable
+asset URL for in-app checks. `FEATHER_SPARKLE_PRIVATE_KEY` is required in Actions; keep its backup
+in the maintainer's login Keychain and never commit it. The matching public key is safe to publish
+and lives in `Resources/Info.plist`.
+
 ## Developer ID distribution
 
 Add these Actions secrets to publish a build that opens normally under Gatekeeper:
@@ -21,7 +27,7 @@ Add these Actions secrets to publish a build that opens normally under Gatekeepe
 The workflow imports signing material into an ephemeral keychain, signs with the hardened runtime,
 submits the app to Apple's notary service, staples the ticket, packages the DMG, and removes the
 temporary keychain even when a step fails. GitHub stores and serves the public download; Feather
-does not need a download server, updater service, or cloud account.
+does not need a separate download server, updater service, or cloud account.
 
 If no certificate secret is present, the workflow still publishes an explicitly suffixed
 `-unsigned.dmg` as a prerelease. Its release notes direct users to macOS's per-app **Open Anyway**

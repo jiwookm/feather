@@ -1,11 +1,17 @@
 import AppKit
 import FeatherCore
+import Sparkle
 import SwiftUI
 
 @main
 struct FeatherApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var model = AppModel()
+  private let updaterController = SPUStandardUpdaterController(
+    startingUpdater: true,
+    updaterDelegate: nil,
+    userDriverDelegate: nil
+  )
 
   var body: some Scene {
     WindowGroup {
@@ -21,6 +27,9 @@ struct FeatherApp: App {
     .windowStyle(.hiddenTitleBar)
     .defaultSize(width: 1280, height: 800)
     .commands {
+      CommandGroup(after: .appInfo) {
+        CheckForUpdatesView(updater: updaterController.updater)
+      }
       CommandGroup(replacing: .newItem) {
         Button("New Terminal…") {
           NotificationCenter.default.post(name: .featherNewTerminalRequested, object: nil)
@@ -124,7 +133,7 @@ struct FeatherApp: App {
     }
 
     Settings {
-      SettingsView(model: model)
+      SettingsView(model: model, updater: updaterController.updater)
         .preferredColorScheme(preferredColorScheme)
     }
   }

@@ -2,11 +2,19 @@ import AppKit
 import FeatherCore
 import SwiftUI
 
+private struct WorktreeRenameRequest: Identifiable {
+  let repositoryID: UUID
+  let worktree: GitWorktree
+  var id: String { worktree.path }
+}
+
 struct SidebarView: View {
   @EnvironmentObject private var model: AppModel
   @Environment(\.colorScheme) private var colorScheme
   @StateObject private var avatars = RepositoryAvatarStore()
   @State private var collapsedRepositories: Set<UUID> = []
+  @State private var renameRequest: WorktreeRenameRequest?
+  @State private var proposedWorktreeName = ""
   let isFullScreen: Bool
 
   private var palette: FeatherPalette { FeatherPalette(colorScheme: colorScheme) }
@@ -45,6 +53,27 @@ struct SidebarView: View {
     }
     .background(palette.sidebar)
     .onDisappear { avatars.cancel() }
+    .alert("Rename Worktree", isPresented: renameAlertPresented) {
+      TextField("Display name", text: $proposedWorktreeName)
+      Button("Cancel", role: .cancel) {}
+      Button("Save") {
+        guard let renameRequest else { return }
+        model.renameWorktree(
+          repositoryID: renameRequest.repositoryID,
+          path: renameRequest.worktree.path,
+          displayName: proposedWorktreeName
+        )
+      }
+    } message: {
+      Text("This changes only the name shown in Feather. The folder and Git branch stay unchanged.")
+    }
+  }
+
+  private var renameAlertPresented: Binding<Bool> {
+    Binding(
+      get: { renameRequest != nil },
+      set: { if !$0 { renameRequest = nil } }
+    )
   }
 
   private var sidebarTitlebar: some View {
@@ -210,10 +239,12 @@ struct SidebarView: View {
   @ViewBuilder
   private func repositorySection(_ repository: RepositoryRecord) -> some View {
     let externalWorktrees = model.externalWorktrees(for: repository)
-    let managedWorktrees = model.projectWorktrees(for: repository)
+    let managedWorktrees = model.activeProjectWorktrees(for: repository)
+    let backlogWorktrees = model.backlogProjectWorktrees(for: repository)
     let pendingWorktree = model.pendingCreation(for: repository)
     let isCollapsed = collapsedRepositories.contains(repository.id)
-    let hasChildren = pendingWorktree != nil || !managedWorktrees.isEmpty
+    let hasChildren =
+      pendingWorktree != nil || !managedWorktrees.isEmpty || !backlogWorktrees.isEmpty
     let mainAgents = agentSessions(repositoryID: repository.id, worktreePath: repository.path)
     let mainRemoteWorkspace = model.remoteWorkspace(
       repositoryID: repository.id,
@@ -253,17 +284,14 @@ struct SidebarView: View {
           AgentSessionBadges(sessions: mainAgents)
         }
 
-        if let mainRemoteWorkspace {
+        if let mainRemoteWorkspace, mainRemoteWorkspace.isRemoteAuthoritative {
           Image(
-            systemName: mainRemoteWorkspace.isRemoteAuthoritative
-              ? "network" : "externaldrive.badge.checkmark"
+            systemName: "network"
           )
           .font(.system(size: 11, weight: .medium))
           .foregroundStyle(palette.secondaryText)
           .help(
-            mainRemoteWorkspace.isRemoteAuthoritative
-              ? "Runs remotely on \(mainRemoteWorkspace.profileName)"
-              : "Returned locally; owned remote copy is retained for cleanup"
+            "Runs remotely on \(mainRemoteWorkspace.profileName)"
           )
         }
 
@@ -361,6 +389,18 @@ struct SidebarView: View {
         ForEach(managedWorktrees) { worktree in
           worktreeRow(repository: repository, worktree: worktree)
         }
+
+        if !backlogWorktrees.isEmpty {
+          Text("Backlog")
+            .font(.feather(size: 11, weight: .semibold))
+            .foregroundStyle(palette.mutedText)
+            .padding(.top, 5)
+            .padding(.leading, 31)
+
+          ForEach(backlogWorktrees) { worktree in
+            worktreeRow(repository: repository, worktree: worktree, isBacklogged: true)
+          }
+        }
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -395,7 +435,8 @@ struct SidebarView: View {
 
   private func worktreeRow(
     repository: RepositoryRecord,
-    worktree: GitWorktree
+    worktree: GitWorktree,
+    isBacklogged: Bool = false
   ) -> some View {
     let selected =
       model.selectedRepositoryID == repository.id
@@ -412,15 +453,14 @@ struct SidebarView: View {
     } label: {
       HStack(spacing: 8) {
         Image(
-          systemName: remoteWorkspace.map {
-            $0.isRemoteAuthoritative ? "network" : "externaldrive.badge.checkmark"
-          } ?? (isAvailable ? "shippingbox" : "arrow.triangle.branch")
+          systemName: remoteWorkspace?.isRemoteAuthoritative == true
+            ? "network" : (isAvailable ? "shippingbox" : "arrow.triangle.branch")
         )
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(selected ? palette.accent : palette.secondaryText)
         .frame(width: 14)
 
-        Text(worktree.branchDisplayName ?? worktree.displayName)
+        Text(model.worktreeDisplayName(repositoryID: repository.id, worktree: worktree))
           .font(.feather(size: 14, weight: selected ? .semibold : .regular))
           .foregroundStyle(isAvailable ? palette.secondaryText : palette.primaryText)
           .lineLimit(1)
@@ -431,8 +471,8 @@ struct SidebarView: View {
           AgentSessionBadges(sessions: agents)
         }
 
-        if let remoteWorkspace {
-          Text(remoteWorkspace.isRemoteAuthoritative ? remoteWorkspace.profileName : "Returned")
+        if let remoteWorkspace, remoteWorkspace.isRemoteAuthoritative {
+          Text(remoteWorkspace.profileName)
             .font(.feather(size: 10, weight: .medium))
             .foregroundStyle(palette.mutedText)
             .lineLimit(1)
@@ -452,6 +492,29 @@ struct SidebarView: View {
     }
     .buttonStyle(.plain)
     .contextMenu {
+      Button("Rename…") {
+        proposedWorktreeName = model.worktreeDisplayName(
+          repositoryID: repository.id,
+          worktree: worktree
+        )
+        renameRequest = WorktreeRenameRequest(
+          repositoryID: repository.id,
+          worktree: worktree
+        )
+      }
+      if isBacklogged {
+        Button("Move to Top") {
+          model.moveWorktreeOutOfBacklog(repositoryID: repository.id, path: worktree.path)
+        }
+      } else {
+        Button("Move to Top") {
+          model.moveWorktreeToTop(repositoryID: repository.id, path: worktree.path)
+        }
+        Button("Move to Backlog") {
+          model.moveWorktreeToBacklog(repositoryID: repository.id, path: worktree.path)
+        }
+      }
+      Divider()
       Button("Open in Finder") {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: worktree.path)])
       }
