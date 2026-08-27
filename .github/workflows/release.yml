@@ -172,7 +172,7 @@ jobs:
                   "$updates_directory"
 
           appcast="$updates_directory/appcast.xml"
-          /usr/bin/test -s "$appcast"
+          /bin/test -s "$appcast"
           if gh release view updater-feed >/dev/null 2>&1; then
               gh release upload updater-feed "$appcast" --clobber
           else
