@@ -19,7 +19,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.1</string>
+    <string>0.3.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>FeatherBuildVariant</key>
@@ -40,5 +40,13 @@
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>SUFeedURL</key>
+    <string>https://github.com/jiwookm/feather/releases/download/updater-feed/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>5i9waXHdM7gvej48gFvsxZ9EX+cnrDDbADVtInB8L4o=</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
 </dict>
 </plist>

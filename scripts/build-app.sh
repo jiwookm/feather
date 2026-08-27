@@ -48,9 +48,13 @@ binary_directory=$(/usr/bin/swift build --configuration release --arch arm64 --s
 /bin/rm -rf -- "$application_path"
 /bin/mkdir -p \
     "$application_path/Contents/MacOS" \
+    "$application_path/Contents/Frameworks" \
     "$application_path/Contents/Resources/AgentIcons" \
     "$application_path/Contents/Resources/Fonts"
 /bin/cp "$binary_directory/Feather" "$application_path/Contents/MacOS/Feather"
+/usr/bin/ditto \
+    "$project_root/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework" \
+    "$application_path/Contents/Frameworks/Sparkle.framework"
 /bin/cp "$project_root/Resources/Info.plist" "$application_path/Contents/Info.plist"
 /bin/cp "$project_root/Resources/Feather.icns" "$application_path/Contents/Resources/Feather.icns"
 /bin/cp "$project_root/Resources/AgentIcons/Claude.svg" "$application_path/Contents/Resources/AgentIcons/Claude.svg"

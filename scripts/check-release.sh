@@ -19,6 +19,7 @@ FEATHER_BUILD_VARIANT=production "$script_directory/build-app.sh"
 /usr/bin/git diff --check
 
 binary="$project_root/dist/Feather.app/Contents/MacOS/Feather"
+sparkle_framework="$project_root/dist/Feather.app/Contents/Frameworks/Sparkle.framework"
 bundle_identifier=$(/usr/libexec/PlistBuddy \
     -c "Print :CFBundleIdentifier" \
     "$project_root/dist/Feather.app/Contents/Info.plist")
@@ -32,6 +33,31 @@ fi
 architecture=$(/usr/bin/file "$binary")
 if [[ "$architecture" != *"arm64"* || "$architecture" == *"x86_64"* ]]; then
     print -u2 "Release binary is not arm64-only: $architecture"
+    exit 1
+fi
+if [[ ! -d "$sparkle_framework" ]]; then
+    print -u2 "Release build is missing Sparkle.framework."
+    exit 1
+fi
+/usr/bin/codesign --verify --strict --verbose=2 "$sparkle_framework"
+if ! /usr/bin/otool -L "$binary" | /usr/bin/grep -q '@rpath/Sparkle.framework'; then
+    print -u2 "Release binary is not linked to its bundled Sparkle framework."
+    exit 1
+fi
+if ! /usr/bin/otool -l "$binary" \
+  | /usr/bin/grep -q '@executable_path/../Frameworks'; then
+    print -u2 "Release binary cannot resolve its bundled Sparkle framework."
+    exit 1
+fi
+feed_url=$(/usr/libexec/PlistBuddy \
+    -c "Print :SUFeedURL" \
+    "$project_root/dist/Feather.app/Contents/Info.plist")
+public_update_key=$(/usr/libexec/PlistBuddy \
+    -c "Print :SUPublicEDKey" \
+    "$project_root/dist/Feather.app/Contents/Info.plist")
+if [[ "$feed_url" != "https://github.com/jiwookm/feather/releases/download/updater-feed/appcast.xml" \
+  || -z "$public_update_key" ]]; then
+    print -u2 "Release build has incomplete updater trust configuration."
     exit 1
 fi
 

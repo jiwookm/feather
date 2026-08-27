@@ -195,6 +195,7 @@ actor RemoteGitStateTransfer {
     let archiveOutput = try await runner.run(
       tarExecutable,
       arguments: ["-C", payloadRoot.path, "-cf", "-"] + artifactNames,
+      environment: ["COPYFILE_DISABLE": "1"],
       maximumOutputBytes: limits.maximumTransferBytes,
       timeout: 60
     )

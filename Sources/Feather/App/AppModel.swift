@@ -61,7 +61,10 @@ enum WorkspaceShortcuts {
 
   static func targets(
     repositories: [RepositoryRecord],
-    worktreesFor: (RepositoryRecord) -> [GitWorktree]
+    worktreesFor: (RepositoryRecord) -> [GitWorktree],
+    displayName: (RepositoryRecord, GitWorktree) -> String = {
+      _, worktree in worktree.branchDisplayName ?? worktree.displayName
+    }
   ) -> [WorkspaceShortcutTarget] {
     var targets: [WorkspaceShortcutTarget] = []
     targets.reserveCapacity(maximumCount)
@@ -73,7 +76,7 @@ enum WorkspaceShortcuts {
             repositoryID: repository.id,
             repositoryName: repository.displayName,
             worktreePath: worktree.path,
-            worktreeName: worktree.branchDisplayName ?? worktree.displayName
+            worktreeName: displayName(repository, worktree)
           )
         )
         if targets.count == maximumCount { return targets }
@@ -174,6 +177,7 @@ final class AppModel: ObservableObject {
   @Published private(set) var repositories: [RepositoryRecord]
   @Published private(set) var worktreesByRepository: [UUID: [GitWorktree]] = [:]
   @Published private(set) var managedWorktrees: [ManagedWorktreeRecord]
+  @Published private(set) var worktreeSidebarRecords: [WorktreeSidebarRecord]
   @Published private(set) var terminals: [TerminalRecord]
   @Published private(set) var terminalRuntimeStates: [UUID: TerminalRuntimeState] = [:]
   @Published private(set) var terminalRuntimeAgentKinds: [UUID: TerminalAgentKind] = [:]
@@ -238,6 +242,7 @@ final class AppModel: ObservableObject {
     let snapshot = (try? stateStore.load()) ?? ApplicationSnapshot()
     repositories = snapshot.repositories
     managedWorktrees = snapshot.managedWorktrees
+    worktreeSidebarRecords = snapshot.worktreeSidebarRecords
     terminals = snapshot.terminals
     appearance = snapshot.appearance
     selectedRepositoryID = snapshot.selectedRepositoryID
@@ -376,17 +381,82 @@ final class AppModel: ObservableObject {
     return (worktreesByRepository[repository.id] ?? [])
       .filter { managedPaths.contains($0.path) }
       .sorted { left, right in
+        let leftSidebar = worktreeSidebarRecord(repositoryID: repository.id, path: left.path)
+        let rightSidebar = worktreeSidebarRecord(repositoryID: repository.id, path: right.path)
+        let leftPlacement = leftSidebar?.placement ?? .active
+        let rightPlacement = rightSidebar?.placement ?? .active
+        if leftPlacement != rightPlacement { return leftPlacement == .active }
         let leftState = managedWorktreeState(repositoryID: repository.id, path: left.path)
         let rightState = managedWorktreeState(repositoryID: repository.id, path: right.path)
         if leftState != rightState { return leftState == .active }
-        return left.displayName.localizedStandardCompare(right.displayName) == .orderedAscending
+        let leftOrder = leftSidebar?.order ?? 0
+        let rightOrder = rightSidebar?.order ?? 0
+        if leftOrder != rightOrder { return leftOrder < rightOrder }
+        return worktreeDisplayName(repositoryID: repository.id, worktree: left)
+          .localizedStandardCompare(
+            worktreeDisplayName(repositoryID: repository.id, worktree: right)
+          ) == .orderedAscending
       }
+  }
+
+  func activeProjectWorktrees(for repository: RepositoryRecord) -> [GitWorktree] {
+    projectWorktrees(for: repository).filter {
+      worktreeSidebarRecord(repositoryID: repository.id, path: $0.path)?.placement != .backlog
+    }
+  }
+
+  func backlogProjectWorktrees(for repository: RepositoryRecord) -> [GitWorktree] {
+    projectWorktrees(for: repository).filter {
+      worktreeSidebarRecord(repositoryID: repository.id, path: $0.path)?.placement == .backlog
+    }
+  }
+
+  func worktreeDisplayName(repositoryID: UUID, worktree: GitWorktree) -> String {
+    worktreeSidebarRecord(repositoryID: repositoryID, path: worktree.path)?.displayNameOverride
+      ?? worktree.branchDisplayName
+      ?? worktree.displayName
+  }
+
+  func renameWorktree(repositoryID: UUID, path: String, displayName: String) {
+    let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    updateWorktreeSidebarRecord(repositoryID: repositoryID, path: path) { record in
+      record.displayNameOverride = trimmed.isEmpty ? nil : trimmed
+    }
+  }
+
+  func moveWorktreeToTop(repositoryID: UUID, path: String) {
+    let minimumOrder =
+      worktreeSidebarRecords
+      .filter { $0.repositoryID == repositoryID && $0.placement == .active }
+      .map(\.order)
+      .min() ?? 0
+    updateWorktreeSidebarRecord(repositoryID: repositoryID, path: path) { record in
+      record.placement = .active
+      record.order = minimumOrder - 1
+    }
+  }
+
+  func moveWorktreeToBacklog(repositoryID: UUID, path: String) {
+    let maximumOrder =
+      worktreeSidebarRecords
+      .filter { $0.repositoryID == repositoryID && $0.placement == .backlog }
+      .map(\.order)
+      .max() ?? 0
+    updateWorktreeSidebarRecord(repositoryID: repositoryID, path: path) { record in
+      record.placement = .backlog
+      record.order = maximumOrder + 1
+    }
+  }
+
+  func moveWorktreeOutOfBacklog(repositoryID: UUID, path: String) {
+    moveWorktreeToTop(repositoryID: repositoryID, path: path)
   }
 
   var workspaceShortcutTargets: [WorkspaceShortcutTarget] {
     WorkspaceShortcuts.targets(
       repositories: repositories,
-      worktreesFor: { projectWorktrees(for: $0) }
+      worktreesFor: { activeProjectWorktrees(for: $0) },
+      displayName: { worktreeDisplayName(repositoryID: $0.id, worktree: $1) }
     )
   }
 
@@ -556,6 +626,9 @@ final class AppModel: ObservableObject {
         worktreesByRepository[repository.id] = worktrees
         let livePaths = Set(worktrees.map(\.path))
         managedWorktrees.removeAll {
+          $0.repositoryID == repository.id && !livePaths.contains($0.path)
+        }
+        worktreeSidebarRecords.removeAll {
           $0.repositoryID == repository.id && !livePaths.contains($0.path)
         }
       } catch {
@@ -888,6 +961,9 @@ final class AppModel: ObservableObject {
           worktreePath: worktree.path
         )
         managedWorktrees.removeAll {
+          $0.repositoryID == repository.id && $0.path == worktree.path
+        }
+        worktreeSidebarRecords.removeAll {
           $0.repositoryID == repository.id && $0.path == worktree.path
         }
         reconcileSelection()
@@ -1470,6 +1546,7 @@ final class AppModel: ObservableObject {
       }
 
       managedWorktrees.removeAll { $0.repositoryID == repository.id }
+      worktreeSidebarRecords.removeAll { $0.repositoryID == repository.id }
       repositories.removeAll { $0.id == repository.id }
       worktreesByRepository.removeValue(forKey: repository.id)
       if selectedRepositoryID == repository.id {
@@ -1483,6 +1560,9 @@ final class AppModel: ObservableObject {
         worktreesByRepository[repository.id] = worktrees
         let livePaths = Set(worktrees.map(\.path))
         managedWorktrees.removeAll {
+          $0.repositoryID == repository.id && !livePaths.contains($0.path)
+        }
+        worktreeSidebarRecords.removeAll {
           $0.repositoryID == repository.id && !livePaths.contains($0.path)
         }
       }
@@ -1522,6 +1602,30 @@ final class AppModel: ObservableObject {
     } else {
       worktreesByRepository[repositoryID, default: []].append(worktree)
     }
+  }
+
+  private func worktreeSidebarRecord(
+    repositoryID: UUID,
+    path: String
+  ) -> WorktreeSidebarRecord? {
+    worktreeSidebarRecords.first { $0.repositoryID == repositoryID && $0.path == path }
+  }
+
+  private func updateWorktreeSidebarRecord(
+    repositoryID: UUID,
+    path: String,
+    update: (inout WorktreeSidebarRecord) -> Void
+  ) {
+    if let index = worktreeSidebarRecords.firstIndex(where: {
+      $0.repositoryID == repositoryID && $0.path == path
+    }) {
+      update(&worktreeSidebarRecords[index])
+    } else {
+      var record = WorktreeSidebarRecord(repositoryID: repositoryID, path: path)
+      update(&record)
+      worktreeSidebarRecords.append(record)
+    }
+    persist()
   }
 
   private func setManagedWorktreeState(
@@ -1566,6 +1670,7 @@ final class AppModel: ObservableObject {
     let snapshot = ApplicationSnapshot(
       repositories: repositories,
       managedWorktrees: managedWorktrees,
+      worktreeSidebarRecords: worktreeSidebarRecords,
       terminals: terminals,
       appearance: appearance,
       selectedRepositoryID: selectedRepositoryID,

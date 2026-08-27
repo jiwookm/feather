@@ -149,6 +149,40 @@ jobs:
               --notes-file "$notes" \
               $prerelease
 
+      - name: Publish signed updater feed
+        shell: zsh {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.FEATHER_SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$SPARKLE_PRIVATE_KEY" ]]; then
+              print -u2 "FEATHER_SPARKLE_PRIVATE_KEY is required to publish updates."
+              exit 1
+          fi
+
+          updates_directory="$RUNNER_TEMP/feather-updates"
+          /bin/mkdir -p "$updates_directory"
+          /bin/cp dist/releases/*.dmg "$updates_directory/"
+          print -rn -- "$SPARKLE_PRIVATE_KEY" \
+              | .build/artifacts/sparkle/Sparkle/bin/generate_appcast \
+                  --ed-key-file - \
+                  --download-url-prefix \
+                  "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/" \
+                  "$updates_directory"
+
+          appcast="$updates_directory/appcast.xml"
+          /usr/bin/test -s "$appcast"
+          if gh release view updater-feed >/dev/null 2>&1; then
+              gh release upload updater-feed "$appcast" --clobber
+          else
+              gh release create updater-feed "$appcast" \
+                  --target "$GITHUB_SHA" \
+                  --title "Feather updater feed" \
+                  --notes "Machine-readable signed update feed used by Feather." \
+                  --prerelease
+          fi
+
       - name: Remove signing material
         if: always()
         shell: zsh {0}

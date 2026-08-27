@@ -66,6 +66,13 @@ struct PersistenceTests {
       path: "/tmp/repo-feature",
       state: .available
     )
+    let sidebarRecord = WorktreeSidebarRecord(
+      repositoryID: repository.id,
+      path: managedWorktree.path,
+      displayNameOverride: "Later",
+      placement: .backlog,
+      order: 3
+    )
     let terminal = TerminalRecord(
       repositoryID: repository.id,
       worktreePath: repository.path,
@@ -86,6 +93,7 @@ struct PersistenceTests {
     let snapshot = ApplicationSnapshot(
       repositories: [repository],
       managedWorktrees: [managedWorktree],
+      worktreeSidebarRecords: [sidebarRecord],
       terminals: [terminal],
       appearance: .dark,
       selectedRepositoryID: repository.id,
@@ -114,6 +122,29 @@ struct PersistenceTests {
         in: loaded.remoteWorkspaces
       ) == terminal.executionTarget
     )
+  }
+
+  @Test
+  func migratesSnapshotWithoutWorktreeSidebarRecords() throws {
+    let data = Data(
+      """
+      {
+        "version": 8,
+        "repositories": [],
+        "managedWorktrees": [],
+        "terminals": [],
+        "appearance": "system",
+        "sidebarVisible": true,
+        "inspectorVisible": false,
+        "remoteProfiles": [],
+        "remoteWorkspaces": []
+      }
+      """.utf8
+    )
+
+    let snapshot = try JSONDecoder().decode(ApplicationSnapshot.self, from: data)
+
+    #expect(snapshot.worktreeSidebarRecords.isEmpty)
   }
 
   @Test
@@ -235,7 +266,7 @@ struct PersistenceTests {
     #expect(loaded.version == 6)
     #expect(loaded.remoteWorkspaces.first?.handoff == nil)
     #expect(loaded.remoteWorkspaces.first?.returned == nil)
-    #expect(ApplicationSnapshot.currentVersion == 8)
+    #expect(ApplicationSnapshot.currentVersion == 9)
   }
 
   @Test

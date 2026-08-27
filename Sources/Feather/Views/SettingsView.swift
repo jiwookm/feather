@@ -1,16 +1,19 @@
 import FeatherCore
+import Sparkle
 import SwiftUI
 
 struct SettingsView: View {
   @ObservedObject var model: AppModel
+  let updater: SPUUpdater
   @State private var draftProfileID: UUID?
   @State private var remoteName: String
   @State private var remoteHost: String
   @State private var remotePort: Int
   @State private var remoteRoot: String
 
-  init(model: AppModel) {
+  init(model: AppModel, updater: SPUUpdater) {
     self.model = model
+    self.updater = updater
     let profile = model.selectedRemoteProfile
     _draftProfileID = State(initialValue: profile?.id)
     _remoteName = State(initialValue: profile?.name ?? "")
@@ -55,6 +58,16 @@ struct SettingsView: View {
 
       Section("Worktrees") {
         LabeledContent("New checkouts", value: model.worktreesRoot.path)
+      }
+
+      Section("Updates") {
+        LabeledContent("Installed version", value: installedVersion)
+        CheckForUpdatesView(updater: updater)
+        Text(
+          "Feather checks a cryptographically signed update feed and verifies each download before installing it."
+        )
+        .font(.feather(size: 11))
+        .foregroundStyle(.secondary)
       }
 
       Section("SSH Profiles") {
@@ -125,6 +138,10 @@ struct SettingsView: View {
     !remoteName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && !remoteHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && !remoteRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  private var installedVersion: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
   }
 
   private var draftRemoteTarget: SSHRemoteTarget {

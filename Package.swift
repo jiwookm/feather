@@ -11,6 +11,9 @@ let package = Package(
     .executable(name: "Feather", targets: ["Feather"]),
     .library(name: "FeatherCore", targets: ["FeatherCore"]),
   ],
+  dependencies: [
+    .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.2")
+  ],
   targets: [
     .binaryTarget(
       name: "LibGhostty",
@@ -24,8 +27,12 @@ let package = Package(
       dependencies: [
         "FeatherCore",
         "LibGhostty",
+        .product(name: "Sparkle", package: "Sparkle"),
       ],
       linkerSettings: [
+        .unsafeFlags([
+          "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+        ]),
         .linkedFramework("AppKit"),
         .linkedFramework("Carbon"),
         .linkedFramework("CoreGraphics"),

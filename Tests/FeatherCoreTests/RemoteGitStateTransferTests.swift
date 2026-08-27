@@ -82,6 +82,34 @@ struct RemoteGitStateTransferTests {
   }
 
   @Test
+  func payloadArchiveOmitsMacExtendedAttributeSidecars() async throws {
+    let fixture = try GitTransferFixture()
+    defer { fixture.remove() }
+    try fixture.write("untracked\n", to: "notes.txt")
+
+    let runner = BoundedCommandRunner()
+    let xattr = try await runner.run(
+      "/usr/bin/xattr",
+      arguments: ["-w", "com.feather.transfer-test", "present", "notes.txt"],
+      currentDirectory: fixture.checkout
+    )
+    #expect(xattr.status == 0)
+
+    let transfer = RemoteGitStateTransfer(
+      runner: runner,
+      gitExecutable: "/usr/bin/git"
+    )
+    let payload = try await transfer.buildPayload(worktreePath: fixture.checkout.path)
+    let archive = fixture.root.appendingPathComponent("payload.tar")
+    try payload.archive.write(to: archive)
+
+    let listing = try await runner.run("/usr/bin/tar", arguments: ["-tf", archive.path])
+    #expect(listing.status == 0)
+    #expect(!listing.stdoutText.contains("._"))
+    #expect(listing.stdoutText.contains("untracked/notes.txt"))
+  }
+
+  @Test
   func findsThePublishedBaseForANewUnpublishedBranch() async throws {
     let fixture = try GitTransferFixture()
     defer { fixture.remove() }
