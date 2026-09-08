@@ -95,7 +95,7 @@ struct FeatherProcessShutdownError: LocalizedError, Sendable {
 @MainActor
 final class ApplicationQuitCoordinator {
   typealias Confirmation = () -> Bool
-  typealias ErrorPresentation = (String) -> Void
+  typealias ErrorPresentation = (String) -> Bool
   typealias ShutdownHandler = () async throws -> Void
   typealias TerminationReply = (Bool) -> Void
 
@@ -116,7 +116,7 @@ final class ApplicationQuitCoordinator {
   func requestTermination(reply: @escaping TerminationReply) -> NSApplication.TerminateReply {
     guard quitTask == nil else { return .terminateLater }
     guard let shutdownHandler else {
-      presentError("Feather could not prepare its managed processes for shutdown.")
+      _ = presentError("Feather could not prepare its managed processes for shutdown.")
       return .terminateCancel
     }
     guard confirm() else { return .terminateCancel }
@@ -126,8 +126,7 @@ final class ApplicationQuitCoordinator {
         try await shutdownHandler()
         reply(true)
       } catch {
-        presentError(error.localizedDescription)
-        reply(false)
+        reply(presentError(error.localizedDescription))
       }
       quitTask = nil
     }
@@ -151,13 +150,15 @@ private enum SystemQuitPrompt {
     return alert.runModal() == .alertFirstButtonReturn
   }
 
-  static func presentFailure(_ message: String) {
+  static func presentFailure(_ message: String) -> Bool {
     NSApp.activate(ignoringOtherApps: true)
     let alert = NSAlert()
     alert.alertStyle = .critical
     alert.messageText = "Feather did not quit"
-    alert.informativeText = message
-    alert.addButton(withTitle: "OK")
-    alert.runModal()
+    alert.informativeText = message + "\n\nForce quit Feather anyway?"
+    alert.addButton(withTitle: "Force Quit")
+    alert.buttons.first?.hasDestructiveAction = true
+    alert.addButton(withTitle: "Cancel")
+    return alert.runModal() == .alertFirstButtonReturn
   }
 }
