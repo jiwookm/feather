@@ -18,7 +18,7 @@ struct ApplicationLifecycleTests {
     var shutdownCalled = false
     let coordinator = ApplicationQuitCoordinator(
       confirm: { false },
-      presentError: { _ in }
+      presentError: { _ in false }
     )
     coordinator.shutdownHandler = { shutdownCalled = true }
 
@@ -36,7 +36,10 @@ struct ApplicationLifecycleTests {
     let reply = TerminationReplyProbe()
     let coordinator = ApplicationQuitCoordinator(
       confirm: { true },
-      presentError: { Issue.record("Unexpected shutdown error: \($0)") }
+      presentError: {
+        Issue.record("Unexpected shutdown error: \($0)")
+        return false
+      }
     )
     coordinator.shutdownHandler = {
       await events.append("cleanup")
@@ -55,12 +58,15 @@ struct ApplicationLifecycleTests {
   }
 
   @Test @MainActor
-  func cleanupFailureCancelsTerminationAndExplainsWhy() async {
+  func cleanupFailureCanCancelTerminationAndExplainsWhy() async {
     let reply = TerminationReplyProbe()
     var presentedMessages: [String] = []
     let coordinator = ApplicationQuitCoordinator(
       confirm: { true },
-      presentError: { presentedMessages.append($0) }
+      presentError: {
+        presentedMessages.append($0)
+        return false
+      }
     )
     coordinator.shutdownHandler = { throw FixtureFailure.cleanup }
 
@@ -69,6 +75,21 @@ struct ApplicationLifecycleTests {
     #expect(response == .terminateLater)
     #expect(!(await reply.wait()))
     #expect(presentedMessages == [FixtureFailure.cleanup.localizedDescription])
+  }
+
+  @Test @MainActor
+  func cleanupFailureCanForceTermination() async {
+    let reply = TerminationReplyProbe()
+    let coordinator = ApplicationQuitCoordinator(
+      confirm: { true },
+      presentError: { _ in true }
+    )
+    coordinator.shutdownHandler = { throw FixtureFailure.cleanup }
+
+    let response = coordinator.requestTermination { reply.record($0) }
+
+    #expect(response == .terminateLater)
+    #expect(await reply.wait())
   }
 
   @Test
